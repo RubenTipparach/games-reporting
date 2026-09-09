@@ -5,6 +5,11 @@ name: Deploy
 # collector rather than a game build - the worst a bad deploy does is drop
 # reports for a minute, and the volume keeps everything already collected.
 #
+# The Fly half follows the pattern high-frontier-fan-game already uses, for the
+# reasons written on each step: a readiness gate that SKIPS rather than fails
+# before bootstrap, an idempotent volume-and-single-machine ensure, and a
+# deploy that retries the transient network faults Fly's remote builder throws.
+#
 # Needs one repository secret:
 #   FLY_API_TOKEN   from `fly tokens create deploy -a games-reporting`
 on:
@@ -21,11 +26,11 @@ on:
         type: boolean
         default: true
 
-concurrency:
-  # One deploy at a time. Two overlapping `fly deploy` runs against a single
-  # machine with a single volume is how you get a half-migrated service.
-  group: deploy-fly
-  cancel-in-progress: false
+# NO workflow-level concurrency. A workflow-level group cancelling in progress
+# would kill a Fly deploy mid-release, and one that queues at workflow level
+# holds up the tests as well. Concurrency belongs per job, and the Fly one
+# never cancels: two overlapping `fly deploy` runs against a single machine on
+# a single volume is how a service ends up half migrated.
 
 jobs:
   test:
@@ -43,9 +48,90 @@ jobs:
     name: Deploy to Fly
     needs: test
     runs-on: ubuntu-latest
+    # Case-insensitive repo gate, so a fork with no Fly access falls through
+    # cleanly instead of failing on a token it was never going to have.
+    if: ${{ contains(fromJSON('["rubentipparach/games-reporting", "RubenTipparach/games-reporting"]'), github.repository) }}
+    concurrency:
+      group: fly-reporting
+      cancel-in-progress: false
+    outputs:
+      ready: ${{ steps.fly_gate.outputs.ready }}
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Three stages, all treated as "skip, do not fail": token missing, token
+      # rejected, app not created yet. None of those is a broken commit, and
+      # failing the run on them turns every fork and every pre-bootstrap push
+      # into a red tick that means nothing. A real deploy failure after the
+      # gate still fails the job, which is the distinction worth keeping.
+      #
+      # `secrets` is not readable from a job-level `if`, which is the other
+      # reason this is a step rather than a condition on the job.
+      - name: Check Fly readiness
+        id: fly_gate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "${FLY_API_TOKEN}" ]; then
+            echo "::notice::FLY_API_TOKEN not set in repository secrets; skipping the deploy. Create one with 'fly tokens create deploy -a games-reporting'."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! flyctl auth whoami > /dev/null 2>&1; then
+            echo "::notice::FLY_API_TOKEN is set but Fly rejected it; skipping the deploy. Regenerate with 'fly tokens create deploy -a games-reporting'."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! flyctl status -a games-reporting > /dev/null 2>&1; then
+            echo "::notice::Fly app 'games-reporting' not found; skipping the deploy. Bootstrap with 'fly apps create games-reporting'."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # SQLite is one file with one writer, so this app is exactly one machine
+      # on exactly one volume (see fly.toml and src/db.js). Fly will happily
+      # leave a second machine behind after a failed release, and a second
+      # machine here does not mean "more capacity", it means two databases that
+      # each hold half the reports. Both halves of this are no-ops once the
+      # desired state holds, so it runs every deploy rather than being
+      # something somebody has to remember once.
+      - name: Ensure the volume, and exactly one machine
+        if: steps.fly_gate.outputs.ready == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          APP: games-reporting
+          REGION: ord
+          VOLUME: reports_data
+        run: |
+          set -e
+          echo "--- volumes before ---"
+          flyctl volumes list -a "$APP"
+          COUNT=$(flyctl volumes list -a "$APP" --json \
+            | jq '[.[] | select(.name=="'"$VOLUME"'" and .region=="'"$REGION"'")] | length')
+          if [ "${COUNT:-0}" -lt 1 ]; then
+            echo "creating volume $VOLUME in $REGION"
+            flyctl volumes create "$VOLUME" --size 1 --region "$REGION" --app "$APP" --yes
+          else
+            echo "volume $VOLUME already exists in $REGION"
+          fi
+
+          echo "--- machines before ---"
+          flyctl machine list -a "$APP"
+          flyctl machine list -a "$APP" --json > /tmp/machines.json
+          IDS=$(jq -r '.[] | select((.config.metadata.fly_process_group // "app") == "app") | .id' /tmp/machines.json)
+          KEPT=""
+          for M in $IDS; do
+            if [ -z "$KEPT" ]; then
+              KEPT="$M"
+              echo "keeping app machine $M"
+              continue
+            fi
+            echo "destroying extra app machine $M (a second writer on this database)"
+            flyctl machine stop "$M" --app "$APP" || true
+            flyctl machine destroy "$M" --app "$APP" --force || true
+          done
 
       # An app with no allocated IP has a hostname that resolves nowhere, while
       # every other part of a deploy still reports success. That is what the
@@ -54,9 +140,11 @@ jobs:
       # it returned curl 000, because `fly apps create` does not allocate one.
       #
       # Both of these are free (a SHARED v4, not a dedicated one) and both are
-      # no-ops once they exist, so this runs on every deploy rather than being
-      # a thing somebody has to remember once.
+      # no-ops once they exist.
       - name: Make sure the app has an address
+        if: steps.fly_gate.outputs.ready == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           if flyctl ips list -a games-reporting | grep -qE '\bv6\b'; then
             echo "v6 already allocated"
@@ -71,28 +159,85 @@ jobs:
             flyctl ips allocate-v4 --shared -a games-reporting
           fi
           flyctl ips list -a games-reporting
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Deploy
-        run: flyctl deploy --remote-only
+      # Staged so the released image boots with them rather than bouncing the
+      # machine a second time to pick them up. Each is only touched when the
+      # Actions secret is set, so an unset one is a no-op and a value set by
+      # hand with `fly secrets set` is never clobbered.
+      #
+      # INGEST_KEY is the one that closes posting, and it is deliberately empty
+      # for now (see src/config.js): setting it in repository secrets is all it
+      # takes to lock the API down, with no code change and no redeploy of a
+      # different image. ID_SALT pins the player pseudonymisation salt so it
+      # survives the volume being recreated; ADMIN_KEY guards the portal.
+      - name: Stage secrets to Fly
+        if: steps.fly_gate.outputs.ready == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          INGEST_KEY: ${{ secrets.INGEST_KEY }}
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          ID_SALT: ${{ secrets.ID_SALT }}
+          APP: games-reporting
+        run: |
+          set -e
+          stage_secret() {
+            name="$1"; val="$2"
+            if [ -n "$val" ]; then
+              echo "staging $name"
+              flyctl secrets set "$name=$val" --app "$APP" --stage
+            else
+              echo "::notice::$name not set in Actions secrets; leaving the Fly value untouched."
+            fi
+          }
+          stage_secret INGEST_KEY "${INGEST_KEY}"
+          stage_secret ADMIN_KEY  "${ADMIN_KEY}"
+          stage_secret ID_SALT    "${ID_SALT}"
+
+      # Fly's remote builder and API drop connections transiently, which makes
+      # `flyctl deploy` fail in a few seconds before any build output at all.
+      # Retry with exponential backoff, the same doctrine this project already
+      # applies to git push and fetch. A genuine failure still fails the job
+      # after the last attempt.
+      - name: Deploy
+        if: steps.fly_gate.outputs.ready == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          for attempt in 1 2 3 4; do
+            echo "::group::flyctl deploy (attempt ${attempt}/4)"
+            if flyctl deploy --remote-only; then
+              echo "::endgroup::"
+              echo "deploy succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "${attempt}" -lt 4 ]; then
+              backoff=$((attempt * attempt * 10))
+              echo "::warning::flyctl deploy failed (attempt ${attempt}/4); retrying in ${backoff}s"
+              sleep "${backoff}"
+            fi
+          done
+          echo "::error::flyctl deploy failed after 4 attempts"
+          exit 1
 
       # A machine that crash-looped to its max restart count stays stopped even
       # once a good image is deployed over it, so a deploy that fixes the crash
-      # still leaves the app down. Nudging it is harmless when it is already
-      # healthy and is the difference between fixed and fixed-but-still-dead
-      # when it is not.
+      # still leaves the app down. That has happened here twice: once on a bad
+      # startup guard, once on a schema mismatch against an older volume.
+      # Nudging it is harmless when it is already healthy and is the difference
+      # between fixed and fixed-but-still-dead when it is not.
       - name: Start the machines
-        run: flyctl machine start -a games-reporting || true
+        if: steps.fly_gate.outputs.ready == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl machine start -a games-reporting || true
 
   smoke:
     name: Smoke test the live service
     needs: deploy
-    if: github.event_name == 'push' || inputs.smoke_test
+    # Nothing was deployed when the gate skipped, so there is nothing to smoke.
+    if: needs.deploy.outputs.ready == 'true' && (github.event_name == 'push' || inputs.smoke_test)
     runs-on: ubuntu-latest
     env:
       URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
@@ -135,7 +280,9 @@ jobs:
           exit 1
 
       # Only when the wait above failed. This is the step that turns "it did
-      # not come up" into a reason.
+      # not come up" into a reason, and it has earned its keep twice: it is
+      # what found the crash-looping startup guard and the missing IP, and
+      # then the schema mismatch against the existing volume.
       - name: Why it did not come up
         if: failure()
         run: |

@@ -11,6 +11,57 @@ import { join } from "node:path";
 // is run on two machines at once, so this app is deliberately a single machine
 // (see fly.toml). If it ever needs to be two, this is the file that changes.
 
+// The table, as data rather than as one SQL string, because it is read twice:
+// once to create the table on a fresh volume and once to work out what an
+// EXISTING volume is missing. `CREATE TABLE IF NOT EXISTS` does nothing at all
+// to a table that is already there, so a column added in a later version never
+// appears on a volume that predates it - the app then crash-loops on boot with
+// "table reports has no column named player" while the deploy itself reports
+// success. That happened on the first volume this app ever had.
+const COLUMNS = [
+  ["id", "TEXT PRIMARY KEY"],
+  ["received_at", "INTEGER NOT NULL DEFAULT 0"],
+  ["game", "TEXT NOT NULL DEFAULT ''"],
+  ["version", "TEXT NOT NULL DEFAULT ''"],
+  ["kind", "TEXT NOT NULL DEFAULT ''"],
+  ["signature", "TEXT NOT NULL DEFAULT ''"],
+  ["title", "TEXT NOT NULL DEFAULT ''"],
+  ["message", "TEXT NOT NULL DEFAULT ''"],
+  ["stack", "TEXT NOT NULL DEFAULT ''"],
+  ["log", "TEXT NOT NULL DEFAULT ''"],
+  ["platform", "TEXT NOT NULL DEFAULT ''"],
+  ["gpu", "TEXT NOT NULL DEFAULT ''"],
+  ["engine", "TEXT NOT NULL DEFAULT ''"],
+  ["session", "TEXT NOT NULL DEFAULT ''"],
+  // An HMAC of whatever id the client sent, never the id itself. See
+  // identity.js for why the raw one is not welcome here.
+  ["player", "TEXT NOT NULL DEFAULT ''"],
+  ["context", "TEXT NOT NULL DEFAULT '{}'"],
+];
+
+// Bring an older database up to the current shape. Only additive: SQLite can
+// add a column to a populated table in place, so an existing row simply gets
+// the default and keeps its data. Nothing here drops or rewrites anything,
+// which is the property that makes it safe to run unconditionally on boot.
+function addMissingColumns(db) {
+  const present = new Set(db.prepare("PRAGMA table_info(reports)").all().map((c) => c.name));
+  const added = [];
+  for (const [name, type] of COLUMNS) {
+    if (present.has(name)) continue;
+    // A primary key cannot be added after the fact, and a reports table with
+    // no `id` is not a reports table. Louder than a silent bad query later.
+    if (type.includes("PRIMARY KEY")) {
+      throw new Error(`reports table exists but has no ${name} column; it is not one of ours`);
+    }
+    db.exec(`ALTER TABLE reports ADD COLUMN ${name} ${type}`);
+    added.push(name);
+  }
+  if (added.length > 0) {
+    console.log(`[reporting] schema: added ${added.join(", ")} to an existing database`);
+  }
+  return added;
+}
+
 export function openDatabase(dataDir) {
   mkdirSync(dataDir, { recursive: true });
   const db = new Database(join(dataDir, "reports.db"));
@@ -25,25 +76,11 @@ export function openDatabase(dataDir) {
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS reports (
-      id          TEXT PRIMARY KEY,
-      received_at INTEGER NOT NULL,
-      game        TEXT NOT NULL,
-      version     TEXT NOT NULL DEFAULT '',
-      kind        TEXT NOT NULL,
-      signature   TEXT NOT NULL,
-      title       TEXT NOT NULL DEFAULT '',
-      message     TEXT NOT NULL DEFAULT '',
-      stack       TEXT NOT NULL DEFAULT '',
-      log         TEXT NOT NULL DEFAULT '',
-      platform    TEXT NOT NULL DEFAULT '',
-      gpu         TEXT NOT NULL DEFAULT '',
-      engine      TEXT NOT NULL DEFAULT '',
-      session     TEXT NOT NULL DEFAULT '',
-      -- An HMAC of whatever id the client sent, never the id itself. See
-      -- identity.js for why the raw one is not welcome here.
-      player      TEXT NOT NULL DEFAULT '',
-      context     TEXT NOT NULL DEFAULT '{}'
+      ${COLUMNS.map(([name, type]) => `${name} ${type}`).join(",\n      ")}
     );
+  `);
+  addMissingColumns(db);
+  db.exec(`
     CREATE INDEX IF NOT EXISTS reports_received ON reports (received_at DESC);
     CREATE INDEX IF NOT EXISTS reports_signature ON reports (signature, received_at DESC);
     CREATE INDEX IF NOT EXISTS reports_game ON reports (game, received_at DESC);
