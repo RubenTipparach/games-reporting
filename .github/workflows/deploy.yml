@@ -56,19 +56,39 @@ jobs:
     needs: deploy
     if: github.event_name == 'push' || inputs.smoke_test
     runs-on: ubuntu-latest
+    env:
+      URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # An app with no allocated IP has a hostname that resolves to nothing,
+      # and every request to it fails in a way that looks exactly like a
+      # crashed app. `fly apps create` does not allocate one, so this is worth
+      # ruling out before reading a single line of application log.
+      - name: The app has an address to be reached at
+        run: |
+          flyctl ips list -a games-reporting | tee /tmp/ips.txt
+          grep -qE '\bv4\b|\bv6\b' /tmp/ips.txt || {
+            echo
+            echo "NO IP ALLOCATED. The hostname cannot route anywhere. Fix with:"
+            echo "  fly ips allocate-v6 -a games-reporting"
+            echo "  fly ips allocate-v4 --shared -a games-reporting"
+            exit 1
+          }
 
       # The machine sleeps when idle and wakes on a request, so the first call
-      # after a deploy can take a few seconds. Waiting for healthz rather than
-      # sleeping a fixed guess.
+      # after a deploy is slow. Polling rather than sleeping a fixed guess, but
+      # bounded: about ninety seconds, after which something is wrong and the
+      # diagnostics below are more use than more waiting.
       - name: Wait for the service to answer
         run: |
-          for i in $(seq 1 30); do
-            code=$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 20 "$URL/healthz" || true)
+          for i in $(seq 1 18); do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 10 "$URL/healthz" || true)
             if [ "$code" = "200" ]; then
               echo "healthy after ${i} attempt(s): $(cat /tmp/health.json)"
               exit 0
@@ -78,13 +98,24 @@ jobs:
           done
           echo "service never answered 200 on /healthz"
           exit 1
-        env:
-          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
+
+      # Only when the wait above failed. This is the step that turns "it did
+      # not come up" into a reason.
+      - name: Why it did not come up
+        if: failure()
+        run: |
+          echo "===== fly status ====="
+          flyctl status -a games-reporting || true
+          echo "===== ips ====="
+          flyctl ips list -a games-reporting || true
+          echo "===== volumes (the mount must exist, in this app's region) ====="
+          flyctl volumes list -a games-reporting || true
+          echo "===== machine logs ====="
+          flyctl logs -a games-reporting --no-tail || true
 
       - name: Send test reports
         run: node scripts/send-test-reports.mjs "$URL" "$INGEST_KEY"
         env:
-          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
           # Empty until posting is locked down, and the script sends no header
           # when it is empty, which is exactly what an open service wants.
           INGEST_KEY: ${{ secrets.INGEST_KEY }}
@@ -95,5 +126,3 @@ jobs:
           test "$code" = "200" || { echo "portal returned $code"; exit 1; }
           grep -q "ADMIN_KEY" /tmp/admin.html || { echo "portal did not render its key prompt"; exit 1; }
           echo "portal is up and asks for a key"
-        env:
-          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
