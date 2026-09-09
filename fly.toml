@@ -1,52 +1,42 @@
-# Fly app for the games reporting API.
+# fly.toml app configuration file generated for games-reporting on 2026-09-09T18:47:02Z
 #
-# Rename `app` to whatever `fly launch` gives you, or run
-# `fly apps create games-reporting` first and leave it.
-app = "games-reporting"
-primary_region = "sea"
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'games-reporting'
+primary_region = 'ord'
 
 [build]
 
 [env]
-  DATA_DIR = "/data"
-  PORT = "8080"
-  RETENTION_DAYS = "90"
+  DATA_DIR = '/data'
+  PORT = '8080'
+  RETENTION_DAYS = '90'
 
-# SQLite lives on this volume. Create it once, in the same region as the app:
-#   fly volumes create reports_data --region sea --size 1
-#
-# One machine, deliberately. SQLite is a file on one volume and two machines
-# cannot both hold it, so the count is pinned here rather than left to scale
-# on its own and corrupt the database the first time it does.
 [[mounts]]
-  source = "reports_data"
-  destination = "/data"
+  source = 'reports_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # Reports arrive in ones and twos and the rest of the day is silence, so the
-  # machine sleeps and wakes on a request. A cold start costs the player
-  # nothing: the game posts in the background and does not wait on the answer.
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  # Zero, not one: with a volume the machine's data survives the stop, so there
-  # is no reason to pay for it to idle.
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
   [http_service.concurrency]
-    type = "requests"
-    soft_limit = 200
+    type = 'requests'
     hard_limit = 250
+    soft_limit = 200
 
-[[http_service.checks]]
-  interval = "30s"
-  timeout = "5s"
-  grace_period = "10s"
-  method = "GET"
-  path = "/healthz"
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'
