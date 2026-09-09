@@ -13,6 +13,12 @@ const limiter = new RateLimiter({ burst: config.rateBurst, perMinute: config.rat
 
 // A key comparison that does not leak the key one character at a time through
 // how long it took to say no.
+// What a report can be. Faults first, then the non-fault kinds; FAULT_KINDS is
+// what the issue rollup counts, so adding a kind here without deciding which
+// side of that line it sits on is the mistake to avoid.
+export const FAULT_KINDS = ["crash", "error", "warning"];
+export const KINDS = [...FAULT_KINDS, "run"];
+
 function keyMatches(given, expected) {
   if (!expected) return false;
   const a = Buffer.from(String(given || ""));
@@ -123,7 +129,14 @@ async function handleIngest(req, res) {
 
   // Anything that is not one of these is filed as an error rather than
   // rejected: a report that arrives is worth more than a taxonomy.
-  const kind = ["crash", "error", "warning"].includes(payload.kind) ? payload.kind : "error";
+  //
+  // "run" is not a fault. It is a summary posted at the end of a play session
+  // whether or not anything went wrong, because the runs that go FINE are the
+  // control group: timings drawn only from the attempts that broke describe
+  // the breakages, not the pacing. It has to be a listed kind rather than an
+  // unknown one, because an unknown kind is filed as an error, and a steady
+  // drip of successful runs arriving as errors would bury the real ones.
+  const kind = KINDS.includes(payload.kind) ? payload.kind : "error";
 
   const message = str(payload.message, 4000);
   const stack = str(payload.stack, 16000);

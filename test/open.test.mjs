@@ -92,3 +92,56 @@ test("the portal is served, and does not gate on arrival", async () => {
   // any more is the early return that put it up before asking the service.
   assert.ok(!html.includes('if (!key) return gate("")'), "the page must not gate before it has asked");
 });
+
+// ---------------------------------------------------------------------------
+// Run summaries. Mining Mike posts one at the end of every depth, cleared or
+// not, and they arrive on the same endpoint as the crashes.
+
+test("a run summary keeps its own kind instead of being filed as an error", async () => {
+  const res = await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike",
+      kind: "run",
+      message: "cleared at depth 2 after 10m 02s",
+      context: { outcome: "cleared", depth: 2, run_seconds: 602, wave_number: 10 },
+    }),
+  });
+  assert.equal(res.status, 201);
+  const { id } = await res.json();
+  assert.equal(store.get(id).kind, "run", "an unlisted kind would have become 'error'");
+});
+
+test("and does not show up as an issue", async () => {
+  const res = await fetch(`${base}/v1/signatures?game=mining-mike`);
+  const { signatures } = await res.json();
+  assert.equal(signatures.length, 0, "a cleared run is not something that went wrong");
+});
+
+test("while a real fault in the same game still does", async () => {
+  await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike",
+      kind: "crash",
+      message: "Invalid access to property 'text' on a null instance",
+    }),
+  });
+  const res = await fetch(`${base}/v1/signatures?game=mining-mike`);
+  const { signatures } = await res.json();
+  assert.equal(signatures.length, 1);
+  assert.equal(signatures[0].kind, "crash");
+});
+
+test("a genuinely unknown kind is still filed as an error, not rejected", async () => {
+  const res = await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "mining-mike", kind: "banana", message: "what is this" }),
+  });
+  assert.equal(res.status, 201);
+  const { id } = await res.json();
+  assert.equal(store.get(id).kind, "error");
+});

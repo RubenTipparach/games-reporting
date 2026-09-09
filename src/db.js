@@ -156,13 +156,21 @@ export function openDatabase(dataDir) {
 
     // One row per distinct crash, which is the view worth opening first: what
     // is happening, how often, since when, and on which builds.
-    signatures({ game, limit = 50 } = {}) {
+    signatures({ game, limit = 50, kinds } = {}) {
       const args = { limit: Math.min(Math.max(1, limit), 200) };
-      let filter = "";
+      // Faults only unless the caller says otherwise. Run summaries arrive on
+      // the same endpoint and share the table, but they are not things that
+      // went wrong, and grouping them as issues would put "cleared at depth 2"
+      // at the top of a crash list.
+      const wanted = kinds && kinds.length > 0 ? kinds : ["crash", "error", "warning"];
+      const placeholders = wanted.map((_, i) => `@kind${i}`);
+      wanted.forEach((k, i) => { args[`kind${i}`] = k; });
+      const where = [`kind IN (${placeholders.join(", ")})`];
       if (game) {
-        filter = "WHERE game = @game";
+        where.push("game = @game");
         args.game = game;
       }
+      const filter = "WHERE " + where.join(" AND ");
       return db
         .prepare(`
           SELECT signature,
