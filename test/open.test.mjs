@@ -292,3 +292,31 @@ test("runs drill down by session, then by mode", async () => {
   assert.equal(surv.runs.length, 1);
   assert.equal(surv.runs[0].outcome, "quit");
 });
+
+test("a session reports both clocks, and they are different numbers", async () => {
+  const post = (b) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b),
+  });
+  // Ninety minutes open, twenty of them inside runs. The gap is the shell, and
+  // reporting only one of these loses it.
+  await post({ game: "clocks", kind: "session", message: "open 90m, 20m in game",
+    session: "sess-clock", context: { session_sec: 5400, played_sec: 1200, mode: "campaign" } });
+
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks`).then((r) => r.json());
+  const c = sessions.find((s) => s.session === "sess-clock");
+  assert.equal(c.seconds, 5400, "the whole time the exe was up");
+  assert.equal(c.played, 1200, "and the part of it inside a run");
+  assert.ok(c.played < c.seconds, "play time cannot exceed app-open time");
+});
+
+test("a session with no runs reports open time and zero play time", async () => {
+  await fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "clocks", kind: "session", message: "open 9m",
+      session: "sess-menus", context: { session_sec: 546, played_sec: 0 } }),
+  });
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks`).then((r) => r.json());
+  const m = sessions.find((s) => s.session === "sess-menus");
+  assert.equal(m.seconds, 546);
+  assert.equal(m.played, 0, "nine minutes of shell, and the table should say so");
+});

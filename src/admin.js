@@ -275,6 +275,7 @@ async function viewSessionList() {
   // Playtime is the headline: it is what a playtest is measured in, and it is
   // the number nothing else in this service could produce.
   const total = sessions.reduce((n, s) => n + (Number(s.seconds) || 0), 0);
+  const totalPlayed = sessions.reduce((n, s) => n + (Number(s.played) || 0), 0);
   const lengths = sessions.map((s) => Number(s.seconds) || 0).sort((a, b) => a - b);
   const mid = Math.floor(lengths.length / 2);
   const med = lengths.length % 2 ? lengths[mid] : Math.round((lengths[mid - 1] + lengths[mid]) / 2);
@@ -282,8 +283,16 @@ async function viewSessionList() {
 
   const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
       '<dl class="kv"><dt>played</dt><dd>' + sessions.length + '</dd>' +
-      '<dt>total time</dt><dd>' + esc(dur(total)) + '</dd>' +
-      '<dt>median</dt><dd>' + esc(dur(med)) + '</dd></dl></div>' +
+      '<dt>median length</dt><dd>' + esc(dur(med)) + '</dd></dl></div>' +
+    // Two totals, because they answer different questions: how long was the
+    // playtest, and how much game was actually played in it. The share tells
+    // you how much of a session the shell is eating.
+    '<div class="block"><h4>Time</h4>' +
+      '<dl class="kv"><dt>app open</dt><dd>' + esc(dur(total)) + '</dd>' +
+      '<dt>in game</dt><dd>' + esc(dur(totalPlayed)) + '</dd>' +
+      '<dt>in menus</dt><dd>' + esc(dur(Math.max(0, total - totalPlayed))) +
+        (total ? ' <span class="dim">' + Math.round(((total - totalPlayed) / total) * 100) + '%</span>' : '') +
+        '</dd></dl></div>' +
     '<div class="block"><h4>How they ended</h4>' +
       '<dl class="kv"><dt>closed normally</dt><dd>' + (sessions.length - crashed) + '</dd>' +
       '<dt class="crashy">ended in a crash</dt><dd class="crashy">' + crashed + '</dd>' +
@@ -292,7 +301,7 @@ async function viewSessionList() {
     '</div>';
 
   const table = '<table><thead><tr>' +
-    '<th>Last seen</th><th>Session</th><th>Played for</th><th>Mode</th>' +
+    '<th>Last seen</th><th>Session</th><th>App open</th><th>In game</th><th>Mode</th>' +
     '<th>Runs</th><th>Faults</th><th>Ended</th>' +
     '</tr></thead><tbody>' +
     sessions.map((s) =>
@@ -301,6 +310,7 @@ async function viewSessionList() {
       '<td>' + esc(s.session) +
         (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</td>' +
       '<td class="num">' + esc(dur(s.seconds)) + '</td>' +
+      '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
       '<td>' + tally(s) + '</td>' +
       '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
@@ -400,7 +410,8 @@ function ctxBlocks(c) {
 
   if (has("session_sec") || has("run") || has("run_sec")) {
     blocks.push(['Session', kv([
-      ["playing for", has("session_sec") ? mmss(c.session_sec) : null],
+      ["app open", has("session_sec") ? mmss(c.session_sec) : null],
+      ["in game", has("played_sec") ? mmss(c.played_sec) : null],
       ["run", c.run],
       ["run length", has("run_sec") ? mmss(c.run_sec) : null],
       ["channel", c.channel],

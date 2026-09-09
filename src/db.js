@@ -267,7 +267,13 @@ export function openDatabase(dataDir) {
                  MAX(player)                 AS player,
                  MIN(received_at)            AS first_seen,
                  MAX(received_at)            AS last_seen,
+                 -- Two clocks, deliberately. The first is the whole time the
+                 -- executable was up, menus and all; the second is the part of
+                 -- it spent inside a run. The gap between them is the shell,
+                 -- and a session that is ninety minutes open with twenty
+                 -- minutes of runs in it says something no single number does.
                  MAX(COALESCE(json_extract(context, '$.session_sec'), 0)) AS seconds,
+                 MAX(COALESCE(json_extract(context, '$.played_sec'), 0))  AS played,
                  MAX(COALESCE(json_extract(context, '$.channel'), '')) AS channel,
                  -- What they played. A session can hold both, so this is the
                  -- set rather than a single value.
