@@ -3,7 +3,7 @@
 # Rename `app` to whatever `fly launch` gives you, or run
 # `fly apps create games-reporting` first and leave it.
 app = "games-reporting"
-primary_region = "sea"
+primary_region = "ord"
 
 [build]
 
@@ -13,7 +13,7 @@ primary_region = "sea"
   RETENTION_DAYS = "90"
 
 # SQLite lives on this volume. Create it once, in the same region as the app:
-#   fly volumes create reports_data --region sea --size 1
+#   fly volumes create reports_data --region ord --size 1
 #
 # One machine, deliberately. SQLite is a file on one volume and two machines
 # cannot both hold it, so the count is pinned here rather than left to scale

@@ -39,6 +39,9 @@ export function openDatabase(dataDir) {
       gpu         TEXT NOT NULL DEFAULT '',
       engine      TEXT NOT NULL DEFAULT '',
       session     TEXT NOT NULL DEFAULT '',
+      -- An HMAC of whatever id the client sent, never the id itself. See
+      -- identity.js for why the raw one is not welcome here.
+      player      TEXT NOT NULL DEFAULT '',
       context     TEXT NOT NULL DEFAULT '{}'
     );
     CREATE INDEX IF NOT EXISTS reports_received ON reports (received_at DESC);
@@ -49,9 +52,9 @@ export function openDatabase(dataDir) {
   const stmts = {
     insert: db.prepare(`
       INSERT INTO reports (id, received_at, game, version, kind, signature, title,
-                           message, stack, log, platform, gpu, engine, session, context)
+                           message, stack, log, platform, gpu, engine, session, player, context)
       VALUES (@id, @received_at, @game, @version, @kind, @signature, @title,
-              @message, @stack, @log, @platform, @gpu, @engine, @session, @context)
+              @message, @stack, @log, @platform, @gpu, @engine, @session, @player, @context)
     `),
     get: db.prepare("SELECT * FROM reports WHERE id = ?"),
     del: db.prepare("DELETE FROM reports WHERE id = ?"),
@@ -105,7 +108,7 @@ export function openDatabase(dataDir) {
       args.limit = Math.min(Math.max(1, limit), 200);
       const sql = `
         SELECT id, received_at, game, version, kind, signature, title,
-               platform, gpu, engine, session
+               platform, gpu, engine, session, player
         FROM reports
         ${where.length ? "WHERE " + where.join(" AND ") : ""}
         ORDER BY received_at DESC
@@ -130,6 +133,7 @@ export function openDatabase(dataDir) {
                  MIN(received_at)        AS first_seen,
                  MAX(received_at)        AS last_seen,
                  COUNT(DISTINCT session) AS sessions,
+                 COUNT(DISTINCT CASE WHEN player <> '' THEN player END) AS players,
                  GROUP_CONCAT(DISTINCT version) AS versions,
                  MAX(game)               AS game,
                  MAX(kind)               AS kind,

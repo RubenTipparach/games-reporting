@@ -12,8 +12,10 @@ import { RateLimiter } from "../src/ratelimit.js";
 
 const dir = mkdtempSync(join(tmpdir(), "reporting-test-"));
 process.env.DATA_DIR = dir;
-process.env.INGEST_KEY = "ingest-secret";
+// Ingest is OPEN here, which is how it is deployed today. The closed case has
+// its own file, because the choice is made once at boot.
 process.env.ADMIN_KEY = "admin-secret";
+process.env.ID_SALT = "test-salt";
 // Generous, so no ordinary test is throttled by the ones before it. The
 // throttling itself is driven deliberately, at the bottom.
 process.env.RATE_BURST = "500";
@@ -21,6 +23,7 @@ process.env.RATE_PER_MINUTE = "500";
 process.env.MAX_BODY_BYTES = "2048";
 
 const { server, store, limiter, tail } = await import("../src/server.js");
+const { pseudonym } = await import("../src/identity.js");
 
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -32,10 +35,14 @@ test.after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function post(body, key = "ingest-secret", headers = {}) {
+function post(body, key = undefined, headers = {}) {
   return fetch(`${base}/v1/reports`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": key, ...headers },
+    headers: {
+      "content-type": "application/json",
+      ...(key === undefined ? {} : { "x-api-key": key }),
+      ...headers,
+    },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
@@ -64,9 +71,9 @@ test("healthz answers without a key", async () => {
   assert.equal((await res.json()).ok, true);
 });
 
-test("a report needs the ingest key", async () => {
-  assert.equal((await post(crash, "wrong")).status, 401);
-  assert.equal((await post(crash, "")).status, 401);
+test("posting is open while no ingest key is configured", async () => {
+  assert.equal((await post(crash)).status, 201, "no key at all is fine");
+  assert.equal((await post(crash, "anything")).status, 201, "and a stray key is ignored");
 });
 
 test("a report is stored and comes back with an id and a signature", async () => {
@@ -117,10 +124,68 @@ test("signatures roll up with a count and the versions they were seen on", async
   assert.ok(top.versions.includes("1.2.3"));
 });
 
-test("reading anything back needs the admin key, and the ingest key will not do", async () => {
-  assert.equal((await adminGet("/v1/reports", "ingest-secret")).status, 401);
-  assert.equal((await adminGet("/v1/signatures", "nope")).status, 401);
-  assert.equal((await adminGet("/v1/reports")).status, 200);
+test("reading is never open, however open posting is", async () => {
+  assert.equal((await fetch(`${base}/v1/reports`)).status, 401, "no key");
+  assert.equal((await adminGet("/v1/signatures", "nope")).status, 401, "wrong key");
+  assert.equal((await adminGet("/v1/reports/does-not-exist", "nope")).status, 401);
+  assert.equal((await adminGet("/v1/reports")).status, 200, "the real key");
+});
+
+test("a Steam id is stored only as a hash, and never comes back out", async () => {
+  const steamId = "76561197960287930";
+  const { id } = await (await post({ ...crash, steam_id: steamId })).json();
+  const one = await (await adminGet(`/v1/reports/${id}`)).json();
+
+  // The hash is there and is what identity.js would produce.
+  assert.equal(one.player, pseudonym(steamId, "test-salt"));
+  assert.match(one.player, /^[0-9a-f]{16}$/);
+
+  // The id itself is nowhere: not in the row, and not in any column of it.
+  const whole = JSON.stringify(one);
+  assert.ok(!whole.includes(steamId), "the raw Steam id must not survive anywhere in the row");
+
+  // And not in the database either, whatever the API chooses to return.
+  const raw = store.db.prepare("SELECT * FROM reports WHERE id = ?").get(id);
+  assert.ok(!JSON.stringify(raw).includes(steamId), "nor in the stored row");
+});
+
+test("the same player hashes the same way twice, and two players differ", async () => {
+  const a1 = await (await post({ ...crash, steam_id: "111" })).json();
+  const a2 = await (await post({ ...crash, steam_id: "111" })).json();
+  const b = await (await post({ ...crash, steam_id: "222" })).json();
+  const row = async (r) => (await (await adminGet(`/v1/reports/${r.id}`)).json()).player;
+  assert.equal(await row(a1), await row(a2), "one player, one hash");
+  assert.notEqual(await row(a1), await row(b), "two players, two hashes");
+});
+
+test("a report with no id at all carries an empty player, not a hash of nothing", async () => {
+  const { id } = await (await post(crash)).json();
+  const one = await (await adminGet(`/v1/reports/${id}`)).json();
+  assert.equal(one.player, "");
+});
+
+test("the rollup counts distinct players without naming any of them", async () => {
+  const tagged = { ...crash, message: "player counting check", stack: "at: res://x.gd:1 @ f()" };
+  await post({ ...tagged, steam_id: "p1" });
+  await post({ ...tagged, steam_id: "p1" });
+  await post({ ...tagged, steam_id: "p2" });
+  const { signatures } = await (await adminGet("/v1/signatures")).json();
+  const row = signatures.find((s) => s.title === "player counting check");
+  assert.ok(row, "expected the group to exist");
+  assert.equal(row.count, 3, "three reports");
+  assert.equal(row.players, 2, "from two players");
+});
+
+test("the portal is served, and holds no data of its own", async () => {
+  const res = await fetch(`${base}/admin`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /text\/html/);
+  const html = await res.text();
+  assert.ok(html.includes("ADMIN_KEY"), "it asks for the key");
+  assert.ok(!html.includes("admin-secret"), "and does not contain it");
+  assert.ok(!html.includes("mining-mike"), "nor any report");
+  assert.match(res.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  assert.equal((await fetch(`${base}/`)).status, 200, "and it is what / serves");
 });
 
 test("a report without a game or without any content is refused", async () => {

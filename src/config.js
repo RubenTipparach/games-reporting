@@ -16,14 +16,20 @@ export const config = {
   // the mount is checked at boot and shouted about rather than assumed.
   dataDir: process.env.DATA_DIR || "/data",
 
-  // Two keys, deliberately. The ingest key ships inside the game build and can
-  // therefore be pulled out of it by anyone who cares to look, so it may only
-  // ever write. The admin key reads and deletes and never leaves your machine.
-  // An empty ingest key means "no key required", which is for local runs only;
-  // the server refuses to start that way unless ALLOW_ANONYMOUS_INGEST is set.
+  // Posting a report is OPEN, on purpose and for now. Setting INGEST_KEY at
+  // any point closes it without a code change: the check below is written so
+  // the key is enforced when there is one and skipped when there is not, so
+  // locking this down later is one `fly secrets set` and a game update, in
+  // that order.
+  //
+  // Open means the rate limit and the body cap are doing the whole job of
+  // keeping this from being a free write endpoint for anyone who finds it.
+  // Those are not optional while it stays this way.
   ingestKey: process.env.INGEST_KEY || "",
+
+  // Reading is never open. This one guards the admin portal and every route
+  // that returns what players have sent, and it never leaves your machine.
   adminKey: process.env.ADMIN_KEY || "",
-  allowAnonymousIngest: process.env.ALLOW_ANONYMOUS_INGEST === "1",
 
   // A report is a few KB of log tail. A quarter of a megabyte is generous for
   // that and small enough that a hostile client cannot fill the volume with

@@ -4,8 +4,11 @@ import { config } from "./config.js";
 import { openDatabase } from "./db.js";
 import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
+import { loadSalt, pseudonym } from "./identity.js";
+import { adminPage } from "./admin.js";
 
 const store = openDatabase(config.dataDir);
+const idSalt = loadSalt(config.dataDir);
 const limiter = new RateLimiter({ burst: config.rateBurst, perMinute: config.ratePerMinute });
 
 // A key comparison that does not leak the key one character at a time through
@@ -95,7 +98,10 @@ async function handleIngest(req, res) {
     });
   }
 
-  if (!config.allowAnonymousIngest && !keyMatches(req.headers["x-api-key"], config.ingestKey)) {
+  // Open while no key is configured. The moment INGEST_KEY is set this starts
+  // enforcing it, with no code change and no redeploy of anything but the
+  // secret - which is the whole point of writing the check this way round.
+  if (config.ingestKey && !keyMatches(req.headers["x-api-key"], config.ingestKey)) {
     return send(res, 401, { error: "bad or missing X-Api-Key" });
   }
 
@@ -149,6 +155,10 @@ async function handleIngest(req, res) {
     // told from twenty players hitting the same thing, which is the difference
     // between a nuisance and a disaster.
     session: str(payload.session, 64),
+    // Whatever id the client offered, kept only as an HMAC. The raw value is
+    // used to compute the hash on this line and is never written to the
+    // database, never logged, and never returned by any route.
+    player: pseudonym(payload.steam_id || payload.player_id || "", idSalt),
     context,
   };
 
@@ -169,8 +179,24 @@ function requireAdmin(req, res) {
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  if (req.method === "GET" && (path === "/healthz" || path === "/")) {
+  if (req.method === "GET" && path === "/healthz") {
     return send(res, 200, { ok: true, reports: store.count() });
+  }
+
+  // The portal is served without a key: it is a static page that holds no
+  // data. Everything it draws comes from the routes below, and those do want
+  // the key, which the page asks for and keeps only in the tab.
+  if (req.method === "GET" && (path === "/" || path === "/admin")) {
+    const html = adminPage();
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "content-length": Buffer.byteLength(html),
+      // No inline anything from anywhere else, and no framing.
+      "content-security-policy":
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+    });
+    return res.end(html);
   }
 
   if (path === "/v1/reports" && req.method === "POST") {
@@ -260,12 +286,11 @@ function startPruning() {
 }
 
 export function start() {
-  if (!config.ingestKey && !config.allowAnonymousIngest) {
-    console.error("[reporting] refusing to start: set INGEST_KEY, or ALLOW_ANONYMOUS_INGEST=1 for a local run");
-    process.exit(1);
+  if (!config.ingestKey) {
+    console.log("[reporting] ingest is OPEN (no INGEST_KEY set); the rate limit and body cap are the only gate");
   }
   if (!config.adminKey) {
-    console.warn("[reporting] ADMIN_KEY is not set, so nothing can read the reports back");
+    console.warn("[reporting] ADMIN_KEY is not set, so the portal and every read route are unusable");
   }
   startPruning();
   server.listen(config.port, "0.0.0.0", () => {

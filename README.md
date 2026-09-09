@@ -25,7 +25,7 @@ anyone who unpacks the game has it, and it can therefore only ever write.
 
 ```bash
 fly launch --no-deploy            # or: fly apps create games-reporting
-fly volumes create reports_data --region sea --size 1
+fly volumes create reports_data --region ord --size 1
 
 fly secrets set INGEST_KEY="$(openssl rand -hex 24)"
 fly secrets set ADMIN_KEY="$(openssl rand -hex 24)"
@@ -68,17 +68,29 @@ curl -X POST https://games-reporting.fly.dev/v1/reports \
     "gpu": "NVIDIA GeForce RTX 3070",
     "engine": "4.7.2",
     "session": "8f2c...",
+    "steam_id": "76561197960287930",
     "context": {"sector": 0, "depth": 3, "wave": 21}
   }'
 ```
 
 `game` is required, and so is at least one of `message` or `stack`. Everything
-else is optional. The reply is `{"id": ..., "signature": ...}`.
+else is optional. The reply is `{"id": ..., "signature": ...}`. Send
+`x-api-key` when the client has a token and leave the header off when it does
+not; today either is accepted.
 
 `session` is the client's own idea of which run this was. It is not an account
 and not a machine id: it exists so that twenty reports from one bad session can
 be told apart from twenty players hitting the same thing, which is the
 difference between a nuisance and a disaster.
+
+`steam_id` (or `player_id`, whichever the game has) is **hashed on arrival and
+the raw value is never stored**, never logged and never returned. What lands in
+the database is an HMAC of it under a salt that stays on the server: enough to
+say "three distinct players", not enough to say who. A plain SHA would not do,
+since the Steam id space is small and public and anyone could hash all of it
+and look the answer up. The salt is what stops that, and is why rotating
+`ID_SALT` re-pseudonymises everybody: old and new hashes for one player stop
+matching, which is useful deliberately and a trap by accident.
 
 ### Reading them back
 
@@ -92,7 +104,7 @@ curl -s -H "x-api-key: $ADMIN_KEY" \
 
 ```json
 {"signatures": [
-  {"signature": "3f9a...", "count": 41, "sessions": 27,
+  {"signature": "3f9a...", "count": 41, "sessions": 27, "players": 19,
    "first_seen": 1757000000000, "last_seen": 1757400000000,
    "versions": "1.2.3,1.3.0", "title": "Invalid access to property text ..."}
 ]}
@@ -131,9 +143,9 @@ Two things are deliberately excluded from it:
 | --- | --- | --- |
 | `PORT` | `8080` | Listen port |
 | `DATA_DIR` | `/data` | Where the SQLite file lives, ie the volume mount |
-| `INGEST_KEY` | none | Required to post. The server refuses to start without it |
-| `ADMIN_KEY` | none | Required to read. Warned about if missing |
-| `ALLOW_ANONYMOUS_INGEST` | off | `1` drops the ingest key. Local runs only |
+| `INGEST_KEY` | none | Unset means posting is open. Set it and posting requires it |
+| `ADMIN_KEY` | none | Required to read anything. Warned about if missing |
+| `ID_SALT` | generated | HMAC salt for player ids. Generated onto the volume if unset |
 | `MAX_BODY_BYTES` | `262144` | Bodies over this are refused as they arrive |
 | `MAX_LOG_CHARS` | `65536` | How much of the log tail is kept |
 | `RATE_BURST` | `20` | Posts one address may make at once |
@@ -144,8 +156,10 @@ Two things are deliberately excluded from it:
 
 ```bash
 npm install
-ALLOW_ANONYMOUS_INGEST=1 ADMIN_KEY=dev DATA_DIR=./data npm start
+ADMIN_KEY=dev DATA_DIR=./data npm start
 ```
+
+Then open <http://localhost:8080> and give it `dev`.
 
 ## Tests
 
@@ -153,7 +167,11 @@ ALLOW_ANONYMOUS_INGEST=1 ADMIN_KEY=dev DATA_DIR=./data npm start
 npm test
 ```
 
-Fourteen checks, driving the real server over real HTTP against a temporary
+Twenty one checks, driving the real server over real HTTP against a temporary
 database. Nothing is stubbed, so a pass means `fly deploy` is deploying
-something that works: both keys, grouping across builds and machines, the body
-cap, the rate limit and its refill, retention of the log tail, and the refusals.
+something that works: posting open and posting closed (the second in its own
+file, since the choice is read once at boot), reading refused without the admin
+key, grouping across builds and machines, Steam ids provably absent from the
+stored row, distinct players counted without being named, the portal holding no
+data of its own, the body cap, the rate limit and its refill, the log tail, and
+the refusals.
