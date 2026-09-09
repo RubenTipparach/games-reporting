@@ -17,9 +17,33 @@ for, no connection string to rotate and no network hop between the API and its
 data. The cost is that it cannot run on two machines at once, so the app is
 deliberately one machine.
 
-**Two keys.** `INGEST_KEY` ships inside the game build, so treat it as public:
-anyone who unpacks the game has it, and it can therefore only ever write.
-`ADMIN_KEY` reads and deletes and never leaves your machine.
+**Two keys, and BOTH SHIP UNSET.** That is the current call: make it work
+first, lock it down later. Right now posting is open to anyone who finds the
+URL, and so is reading the reports and deleting them.
+
+Each key is its own switch and neither needs a code change to flip:
+
+| Set this | and | leave it unset and |
+| --- | --- | --- |
+| `INGEST_KEY` | posting a report needs `x-api-key` | anyone can post |
+| `ADMIN_KEY` | reading and deleting need `x-api-key` | anyone with the URL can read and delete |
+
+`INGEST_KEY` ships inside the game build, so treat it as public: anyone who
+unpacks the game has it, and it can therefore only ever write. `ADMIN_KEY`
+covers reading and deleting and never leaves your machine.
+
+Turning either on is one command, or one repository secret (the deploy stages
+both, so a value in the box closes that half on the next push):
+
+```bash
+fly secrets set ADMIN_KEY="$(openssl rand -hex 24)" -a games-reporting
+```
+
+What being open exposes: the log tail, the session id, platform and GPU, and
+whatever the game put in `context`. Steam ids are not among them, whatever the
+keys are set to. Those are HMACed on the way in and the raw one is never
+stored, so an open portal opens the crash data without opening who anybody
+is.
 
 ## Deploying
 
@@ -27,8 +51,9 @@ anyone who unpacks the game has it, and it can therefore only ever write.
 fly launch --no-deploy            # or: fly apps create games-reporting
 fly volumes create reports_data --region ord --size 1
 
-fly secrets set INGEST_KEY="$(openssl rand -hex 24)"
-fly secrets set ADMIN_KEY="$(openssl rand -hex 24)"
+# Both optional, and both currently unset. See the two keys above.
+# fly secrets set INGEST_KEY="$(openssl rand -hex 24)"
+# fly secrets set ADMIN_KEY="$(openssl rand -hex 24)"
 
 fly deploy
 ```
@@ -98,8 +123,8 @@ The first thing worth opening is the rollup, because it answers "what is
 actually happening" rather than "what happened most recently":
 
 ```bash
-curl -s -H "x-api-key: $ADMIN_KEY" \
-  https://games-reporting.fly.dev/v1/signatures?game=mining-mike | jq
+# The header is only needed once ADMIN_KEY is set; it is ignored while it is not.
+curl -s https://games-reporting.fly.dev/v1/signatures?game=mining-mike | jq
 ```
 
 ```json
@@ -113,8 +138,7 @@ curl -s -H "x-api-key: $ADMIN_KEY" \
 Then pull the reports behind one of them:
 
 ```bash
-curl -s -H "x-api-key: $ADMIN_KEY" \
-  "https://games-reporting.fly.dev/v1/reports?signature=3f9a..." | jq
+curl -s "https://games-reporting.fly.dev/v1/reports?signature=3f9a..." | jq
 ```
 
 Paging is by cursor, not offset: pass the `received_at` of the last row you saw
@@ -144,7 +168,7 @@ Two things are deliberately excluded from it:
 | `PORT` | `8080` | Listen port |
 | `DATA_DIR` | `/data` | Where the SQLite file lives, ie the volume mount |
 | `INGEST_KEY` | none | Unset means posting is open. Set it and posting requires it |
-| `ADMIN_KEY` | none | Required to read anything. Warned about if missing |
+| `ADMIN_KEY` | none | Unset means reading and deleting are open. Set it and both require it |
 | `ID_SALT` | generated | HMAC salt for player ids. Generated onto the volume if unset |
 | `MAX_BODY_BYTES` | `262144` | Bodies over this are refused as they arrive |
 | `MAX_LOG_CHARS` | `65536` | How much of the log tail is kept |
@@ -156,10 +180,12 @@ Two things are deliberately excluded from it:
 
 ```bash
 npm install
-ADMIN_KEY=dev DATA_DIR=./data npm start
+DATA_DIR=./data npm start
 ```
 
-Then open <http://localhost:8080> and give it `dev`.
+Then open <http://localhost:8080>. It loads straight into the reports. Add
+`ADMIN_KEY=dev` to that command to try the locked-down side, and the page will
+ask for `dev` instead.
 
 ## Tests
 

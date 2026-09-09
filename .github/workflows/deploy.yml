@@ -169,7 +169,14 @@ jobs:
       # for now (see src/config.js): setting it in repository secrets is all it
       # takes to lock the API down, with no code change and no redeploy of a
       # different image. ID_SALT pins the player pseudonymisation salt so it
-      # survives the volume being recreated; ADMIN_KEY guards the portal.
+      # survives the volume being recreated; ADMIN_KEY closes the portal and
+      # every read and delete route.
+      #
+      # BOTH KEYS SHIP UNSET, and that is the whole lockdown switch: putting a
+      # value in either repository secret closes that half on the next deploy,
+      # with no code change. That is what "easy to turn on later" is buying,
+      # and it is why these are staged here rather than being something to
+      # remember to run by hand.
       - name: Stage secrets to Fly
         if: steps.fly_gate.outputs.ready == 'true'
         env:
@@ -321,18 +328,20 @@ jobs:
           code=$(curl -s -o /tmp/sig.json -w '%{http_code}' --max-time 20 "$URL/v1/signatures")
           if [ "$code" = "401" ]; then
             echo
-            echo "The read routes are still gated, so ADMIN_KEY is set as a Fly secret."
-            echo "The code no longer requires one; the live secret does. Clear it with:"
+            echo "The read routes are gated, so ADMIN_KEY is set as a Fly secret."
+            echo "That is the lockdown flag in its ON position. To open the portal:"
             echo "    fly secrets unset ADMIN_KEY -a games-reporting"
+            echo "and clear the ADMIN_KEY repository secret so the deploy stops staging it."
             exit 1
           fi
           test "$code" = "200" || { echo "/v1/signatures returned $code"; cat /tmp/sig.json; exit 1; }
           echo "issues readable with no key: $(cat /tmp/sig.json | head -c 400)"
 
-          # The one route that must NOT be open. 403 is "no key is set so this
-          # is off"; 401 would mean a key is set, which the check above rules
-          # out. Anything else means a stranger can empty the database.
+          # Deleting is behind the same flag, so it is open too. Proved with an
+          # id that does not exist: an open route answers 404 for a missing
+          # report, a closed one answers 401 before it ever looks. Nothing is
+          # destroyed either way, which is why the check uses a zero uuid.
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
             -X DELETE "$URL/v1/reports/00000000-0000-0000-0000-000000000000")
-          test "$code" = "403" || { echo "DELETE answered $code; it must not be open"; exit 1; }
-          echo "and deleting is off, as it should be"
+          test "$code" = "404" || { echo "DELETE answered $code, expected 404"; exit 1; }
+          echo "and deleting is reachable without a key, as the flag says"

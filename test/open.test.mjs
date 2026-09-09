@@ -1,6 +1,8 @@
-// The portal with no ADMIN_KEY set, which is how it is deployed right now:
-// make it work first, lock it down later. api.test.mjs covers the same routes
-// WITH a key, so between them both halves of the decision are pinned.
+// Both lockdown flags off, which is how this is deployed right now: make it
+// work first, lock it down later. api.test.mjs runs the same routes with
+// ADMIN_KEY set and closed.test.mjs with INGEST_KEY set, so between the three
+// of them the flag is pinned in both positions rather than just the shipped
+// one - which is the only way "easy to turn on later" stays true.
 //
 // A separate file because config is read once at import, so the choice cannot
 // be flipped inside a running server without lying about how it works.
@@ -76,12 +78,10 @@ test("a key that nobody asked for is simply ignored", async () => {
   assert.equal(res.status, 200, "an open service does not start checking a key it was not given");
 });
 
-test("but deleting is OFF, not open", async () => {
+test("and so is deleting, since it is behind the same flag", async () => {
   const res = await fetch(`${base}/v1/reports/${id}`, { method: "DELETE" });
-  assert.equal(res.status, 403);
-  const { error } = await res.json();
-  assert.match(error, /ADMIN_KEY/);
-  assert.equal(store.count(), 1, "and the report is still there");
+  assert.equal(res.status, 200);
+  assert.equal(store.count(), 0);
 });
 
 test("the portal is served, and does not gate on arrival", async () => {

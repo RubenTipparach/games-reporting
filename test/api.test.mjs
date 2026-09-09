@@ -188,6 +188,20 @@ test("the portal is served, and holds no data of its own", async () => {
   assert.equal((await fetch(`${base}/`)).status, 200, "and it is what / serves");
 });
 
+// The flag in its ON position, which is the half that has to keep working for
+// "lock it down later" to mean anything. open.test.mjs runs the same routes
+// with it off.
+test("with ADMIN_KEY set, reading and deleting both want it", async () => {
+  for (const path of ["/v1/signatures", "/v1/reports"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 401, `${path} should be closed`);
+  }
+  const del = await fetch(`${base}/v1/reports/00000000-0000-0000-0000-000000000000`, {
+    method: "DELETE",
+  });
+  assert.equal(del.status, 401, "deleting should be closed too");
+});
+
 test("a report without a game or without any content is refused", async () => {
   assert.equal((await post({ message: "no game field" })).status, 400);
   assert.equal((await post({ game: "mining-mike" })).status, 400);

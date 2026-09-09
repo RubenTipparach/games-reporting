@@ -168,34 +168,15 @@ async function handleIngest(req, res) {
   return send(res, 201, { id: row.id, signature: row.signature });
 }
 
-// Reading is OPEN while ADMIN_KEY is unset, which is the same bargain posting
-// already makes with INGEST_KEY: make it work first, lock it down later.
-// Setting ADMIN_KEY at any point closes the portal and every read route with
-// no code change and no different image, so "later" costs one `fly secrets
-// set` rather than a deploy.
+// Reads and deletes, behind the ADMIN_KEY flag (see config.js). Open while it
+// is unset, which is how this ships; set it and every route below closes.
 //
-// What is on the other side of an open portal, so the choice is made with its
-// price written down: the log tail, the session id, the platform and GPU, and
-// whatever the game put in `context`. Steam ids are not among them - those are
-// HMACed on the way in and the raw one is never stored (see identity.js), so
-// opening this does not expose who anybody is.
-function requireRead(req, res) {
+// One function rather than two because reading and deleting are behind the
+// same switch. Splitting them was the version that shipped for one commit and
+// it made deleting OFF by default rather than open, which is a different
+// posture from the one that was asked for.
+function requireKey(req, res) {
   if (!config.adminKey) return true;
-  if (keyMatches(req.headers["x-api-key"], config.adminKey)) return true;
-  send(res, 401, { error: "bad or missing X-Api-Key" });
-  return false;
-}
-
-// Deleting is not reading, and an open DELETE on a public URL is a stranger
-// emptying the crash database with one curl. So it is the one route that
-// always wants the key: with none set it is OFF rather than open. Nothing in
-// the portal calls it - it is the cleanup one-liner in
-// scripts/send-test-reports.mjs - so this costs the open portal nothing.
-function requireDelete(req, res) {
-  if (!config.adminKey) {
-    send(res, 403, { error: "deleting is off until ADMIN_KEY is set" });
-    return false;
-  }
   if (keyMatches(req.headers["x-api-key"], config.adminKey)) return true;
   send(res, 401, { error: "bad or missing X-Api-Key" });
   return false;
@@ -209,8 +190,7 @@ function handleRequest(req, res, url) {
   }
 
   // The portal is a static page that holds no data; everything it draws comes
-  // from the read routes below. It asks for a key only when those answer 401,
-  // so with ADMIN_KEY unset it simply opens and shows the reports.
+  // from the read routes below, and those are open, so it just loads.
   if (req.method === "GET" && (path === "/" || path === "/admin")) {
     const html = adminPage();
     res.writeHead(200, {
@@ -229,7 +209,7 @@ function handleRequest(req, res, url) {
   }
 
   if (path === "/v1/reports" && req.method === "GET") {
-    if (!requireRead(req, res)) return undefined;
+    if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
     return send(res, 200, {
       reports: store.list({
@@ -243,7 +223,7 @@ function handleRequest(req, res, url) {
   }
 
   if (path === "/v1/signatures" && req.method === "GET") {
-    if (!requireRead(req, res)) return undefined;
+    if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
     return send(res, 200, {
       signatures: store.signatures({
@@ -256,13 +236,13 @@ function handleRequest(req, res, url) {
   const one = path.match(/^\/v1\/reports\/([A-Za-z0-9-]+)$/);
   if (one) {
     if (req.method === "GET") {
-      if (!requireRead(req, res)) return undefined;
+      if (!requireKey(req, res)) return undefined;
       const report = store.get(one[1]);
       if (!report) return send(res, 404, { error: "not found" });
       return send(res, 200, report);
     }
     if (req.method === "DELETE") {
-      if (!requireDelete(req, res)) return undefined;
+      if (!requireKey(req, res)) return undefined;
       const deleted = store.remove(one[1]);
       return send(res, deleted ? 200 : 404,
         deleted ? { deleted: true } : { error: "not found" });
@@ -315,10 +295,12 @@ export function start() {
   if (!config.ingestKey) {
     console.log("[reporting] ingest is OPEN (no INGEST_KEY set); the rate limit and body cap are the only gate");
   }
-  if (!config.adminKey) {
-    console.log("[reporting] the portal is OPEN (no ADMIN_KEY set); anyone with the URL can read every report");
-    console.log("[reporting] deleting is off until ADMIN_KEY is set");
-  }
+  // The posture, on every boot, in one line. Worth having in the log because
+  // "is this thing open" is otherwise a question you answer by reading code.
+  console.log(
+    "[reporting] posting is " + (config.ingestKey ? "CLOSED (INGEST_KEY is set)" : "OPEN") +
+    "; reading and deleting are " + (config.adminKey ? "CLOSED (ADMIN_KEY is set)" : "OPEN")
+  );
   startPruning();
   server.listen(config.port, "0.0.0.0", () => {
     console.log(`[reporting] listening on ${config.port}, data in ${config.dataDir}, ${store.count()} report(s) held`);

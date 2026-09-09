@@ -9,9 +9,11 @@
 // Everything sent is marked `"context": {"smoke_test": true}` and carries the
 // game id `test-harness`, so it is easy to find and easy to delete later:
 //
-//   curl -s -H "x-api-key: $ADMIN_KEY" "$URL/v1/reports?game=test-harness" \
+//   curl -s "$URL/v1/reports?game=test-harness" \
 //     | jq -r '.reports[].id' \
-//     | xargs -I{} curl -s -X DELETE -H "x-api-key: $ADMIN_KEY" "$URL/v1/reports/{}"
+//     | xargs -I{} curl -s -X DELETE "$URL/v1/reports/{}"
+//
+// Add `-H "x-api-key: $ADMIN_KEY"` to both if ADMIN_KEY has been set.
 
 const url = (process.argv[2] || "http://localhost:8080").replace(/\/+$/, "");
 const token = process.argv[3] || process.env.INGEST_KEY || "";

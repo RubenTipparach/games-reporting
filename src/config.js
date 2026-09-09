@@ -27,8 +27,21 @@ export const config = {
   // Those are not optional while it stays this way.
   ingestKey: process.env.INGEST_KEY || "",
 
-  // Reading is never open. This one guards the admin portal and every route
-  // that returns what players have sent, and it never leaves your machine.
+  // The other half of the same switch. Set ADMIN_KEY and reading the reports
+  // and deleting them both start wanting `x-api-key`; leave it unset and the
+  // portal and its data are open to anyone with the URL.
+  //
+  // THE TWO ARE INDEPENDENT AND BOTH SHIP OFF. That is deliberate: the call is
+  // to make it work first and lock it down later, and "later" is meant to cost
+  // one `fly secrets set` rather than a code change, a review and a new image.
+  // The deploy workflow already stages both from repository secrets, so
+  // turning either on is putting a value in one box.
+  //
+  // What being open exposes, so the choice keeps its price attached: the log
+  // tail, the session id, platform and GPU, and whatever the game put in
+  // `context`. Steam ids are NOT among them - those are HMACed on the way in
+  // and the raw one is never stored (see identity.js) - so an open portal
+  // opens the crash data without opening who anybody is.
   adminKey: process.env.ADMIN_KEY || "",
 
   // A report is a few KB of log tail. A quarter of a megabyte is generous for
