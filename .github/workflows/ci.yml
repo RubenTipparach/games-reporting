@@ -1,0 +1,47 @@
+name: CI
+
+# Every branch and every pull request. Deploying is main's job (see
+# deploy.yml); this one just answers whether the code is sound, so a branch
+# knows before it is merged rather than after.
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm test
+
+      # The tests run against the source; this is the other thing a deploy
+      # needs to be true, and the one that cannot be caught any other way
+      # before `fly deploy` tries it for real.
+      - name: The image still builds
+        run: docker build -t games-reporting:ci .
+
+      - name: And the built image serves
+        run: |
+          docker run -d --name api -p 8080:8080 -e ADMIN_KEY=ci-key games-reporting:ci
+          for i in $(seq 1 20); do
+            if curl -sf --max-time 5 http://localhost:8080/healthz > /tmp/h.json; then
+              echo "healthy: $(cat /tmp/h.json)"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf --max-time 5 http://localhost:8080/healthz > /dev/null \
+            || { echo "container never became healthy"; docker logs api; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' \
+            -d '{"game":"ci","kind":"error","message":"container smoke test"}' \
+            http://localhost:8080/v1/reports)
+          test "$code" = "201" || { echo "post returned $code"; docker logs api; exit 1; }
+          echo "the image takes a report"
+          docker rm -f api

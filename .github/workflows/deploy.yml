@@ -1,0 +1,99 @@
+name: Deploy
+
+# Deploy on commit to main, which is the whole arrangement: merging is
+# releasing. There is no separate "publish" button, because this is a crash
+# collector rather than a game build - the worst a bad deploy does is drop
+# reports for a minute, and the volume keeps everything already collected.
+#
+# Needs one repository secret:
+#   FLY_API_TOKEN   from `fly tokens create deploy -a games-reporting`
+on:
+  push:
+    branches: [main]
+    # Nothing here changes what runs, so do not spend a deploy on it.
+    paths-ignore:
+      - "README.md"
+      - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      smoke_test:
+        description: "Post test reports at the live service afterwards"
+        type: boolean
+        default: true
+
+concurrency:
+  # One deploy at a time. Two overlapping `fly deploy` runs against a single
+  # machine with a single volume is how you get a half-migrated service.
+  group: deploy-fly
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm test
+
+  deploy:
+    name: Deploy to Fly
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  smoke:
+    name: Smoke test the live service
+    needs: deploy
+    if: github.event_name == 'push' || inputs.smoke_test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The machine sleeps when idle and wakes on a request, so the first call
+      # after a deploy can take a few seconds. Waiting for healthz rather than
+      # sleeping a fixed guess.
+      - name: Wait for the service to answer
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 20 "$URL/healthz" || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ${i} attempt(s): $(cat /tmp/health.json)"
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP ${code}"
+            sleep 5
+          done
+          echo "service never answered 200 on /healthz"
+          exit 1
+        env:
+          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
+
+      - name: Send test reports
+        run: node scripts/send-test-reports.mjs "$URL" "$INGEST_KEY"
+        env:
+          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
+          # Empty until posting is locked down, and the script sends no header
+          # when it is empty, which is exactly what an open service wants.
+          INGEST_KEY: ${{ secrets.INGEST_KEY }}
+
+      - name: Confirm the portal is being served
+        run: |
+          code=$(curl -s -o /tmp/admin.html -w '%{http_code}' --max-time 20 "$URL/admin")
+          test "$code" = "200" || { echo "portal returned $code"; exit 1; }
+          grep -q "ADMIN_KEY" /tmp/admin.html || { echo "portal did not render its key prompt"; exit 1; }
+          echo "portal is up and asks for a key"
+        env:
+          URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
