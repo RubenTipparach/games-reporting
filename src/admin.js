@@ -63,11 +63,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .block .kv dt { color: var(--dim); }
 .block .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 /* Outcome is state, so it reads at a glance rather than as another word. */
-.outcome-cleared   { color: #6fd08c; }
-.outcome-died      { color: var(--crash); }
+.outcome-succeeded { color: #6fd08c; }
+.outcome-failed    { color: var(--crash); }
+.outcome-quit      { color: var(--warn); }
 .outcome-crashed   { color: var(--crash); font-weight: 600; }
-.outcome-abandoned { color: var(--warn); }
-.outcome-redeploy  { color: var(--error); }
+.crashy            { color: var(--crash); }
+button.mode        { padding: 3px 8px; font-size: 12px; }
 .kind-crash { color: var(--crash); }
 .kind-error { color: var(--error); }
 .kind-warning { color: var(--warn); }
@@ -146,7 +147,7 @@ function gate(msg) {
 function toolbar(active) {
   bar.innerHTML =
     '<button id="nav-sig">Issues</button><button id="nav-all">All reports</button>' +
-    '<button id="nav-runs">Runs</button>' +
+    '<button id="nav-runs">Sessions</button>' +
     '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
@@ -154,7 +155,11 @@ function toolbar(active) {
     (key ? '<button id="out">Forget key</button>' : '');
   document.getElementById("nav-sig").onclick = () => { state.view = "signatures"; state.signature = ""; render(); };
   document.getElementById("nav-all").onclick = () => { state.view = "reports"; state.signature = ""; render(); };
-  document.getElementById("nav-runs").onclick = () => { state.view = "runs"; state.signature = ""; state.report = null; render(); };
+  document.getElementById("nav-runs").onclick = () => {
+    state.view = "runs"; state.signature = ""; state.report = null;
+    state.session = ""; state.mode = "";
+    render();
+  };
   document.getElementById("refresh").onclick = render;
   const out = document.getElementById("out");
   if (out) out.onclick = () => { key = ""; sessionStorage.removeItem(KEY); render(); };
@@ -163,7 +168,10 @@ function toolbar(active) {
   void active;
 }
 
-const state = { view: "signatures", game: "", signature: "", report: null };
+// 'session' and 'mode' are the two drill-down steps. Empty means "not drilled
+// in yet", so the same view renders all three levels and the back links just
+// clear one of them.
+const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
 
 // Seconds as something a person reads. Runs are minutes, not hours.
 function mmss(sec) {
@@ -220,51 +228,123 @@ async function viewReports() {
       '</tr>').join("") + '</tbody></table>';
 }
 
-// The pacing view. A run summary arrives at the end of every depth, cleared or
-// not, and the ones that went FINE are the point: timings drawn only from the
-// attempts that broke describe the breakages rather than the pacing.
+// A playtest, read from the outside in:
+//
+//   session (open the game to close or crash it)
+//     -> campaign or survival
+//        -> a sector+depth run that succeeded, failed or was quit
+//
+// All three levels are this one function, because they are one question asked
+// at three widths and splitting them would mean three back buttons that each
+// forget something different.
 async function viewRuns() {
+  if (state.session) return viewOneSession();
+  return viewSessionList();
+}
+
+// How long, in the units a session is actually discussed in.
+function dur(sec) {
+  const n = Math.max(0, Number(sec) || 0);
+  if (n < 60) return n + "s";
+  if (n < 3600) return Math.floor(n / 60) + "m " + String(n % 60).padStart(2, "0") + "s";
+  return Math.floor(n / 3600) + "h " + String(Math.floor((n % 3600) / 60)).padStart(2, "0") + "m";
+}
+
+// The outcome tally as one readable cell. Zeroes are dropped rather than
+// printed, so a session that went perfectly reads "3 succeeded" and not
+// "3 succeeded 0 failed 0 quit".
+function tally(s) {
+  const parts = [];
+  if (s.succeeded) parts.push('<span class="outcome-succeeded">' + s.succeeded + ' succeeded</span>');
+  if (s.failed) parts.push('<span class="outcome-failed">' + s.failed + ' failed</span>');
+  if (s.quit) parts.push('<span class="outcome-quit">' + s.quit + ' quit</span>');
+  if (!parts.length) return '<span class="dim">no runs</span>';
+  return parts.join(' <span class="dim">/</span> ');
+}
+
+// LEVEL ONE: every session.
+async function viewSessionList() {
   const q = state.game ? "?game=" + encodeURIComponent(state.game) : "";
-  const { runs } = await api("/v1/runs" + q);
-  if (!runs.length) {
-    return '<div class="empty">No runs reported yet.' +
-      '<br><span class="dim">The game posts one at the end of every depth. ' +
-      'Nothing here means no build has finished a depth yet.</span></div>';
+  const { sessions } = await api("/v1/sessions" + q);
+  if (!sessions.length) {
+    return '<div class="empty">No sessions yet.' +
+      '<br><span class="dim">The game pings every few minutes while it is open, ' +
+      'so a session appears as soon as somebody plays for that long.</span></div>';
   }
 
-  // Median, not mean: one abandoned run at twenty seconds drags a mean down
-  // and says nothing about how long a depth takes.
-  const byDepth = new Map();
-  for (const r of runs) {
-    const d = r.depth == null ? "?" : r.depth;
-    if (!byDepth.has(d)) byDepth.set(d, []);
-    byDepth.get(d).push(Number(r.seconds) || 0);
-  }
-  const rows = [...byDepth.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  const median = (xs) => {
-    const v = [...xs].sort((a, b) => a - b);
-    const m = Math.floor(v.length / 2);
-    return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
-  };
-  const medians = rows.map(([d, xs]) => [d, median(xs), xs.length]);
-  const peak = Math.max(1, ...medians.map((m) => m[1]));
+  // Playtime is the headline: it is what a playtest is measured in, and it is
+  // the number nothing else in this service could produce.
+  const total = sessions.reduce((n, s) => n + (Number(s.seconds) || 0), 0);
+  const lengths = sessions.map((s) => Number(s.seconds) || 0).sort((a, b) => a - b);
+  const mid = Math.floor(lengths.length / 2);
+  const med = lengths.length % 2 ? lengths[mid] : Math.round((lengths[mid - 1] + lengths[mid]) / 2);
+  const crashed = sessions.filter((s) => s.ended_in_crash).length;
 
-  const bars = '<div class="card"><h2>Median time per depth</h2><div class="bars">' +
-    medians.map(([d, med, n]) =>
-      '<div class="bar-row"><span>Depth ' + esc(d) + '</span>' +
-      '<span class="bar-track"><span class="bar-fill" style="width:' +
-        Math.round((med / peak) * 100) + '%"></span></span>' +
-      '<span class="bar-val">' + esc(mmss(med)) + '</span>' +
-      '<span class="dim">' + n + ' run' + (n === 1 ? "" : "s") + '</span></div>').join("") +
-    '</div></div>';
+  const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
+      '<dl class="kv"><dt>played</dt><dd>' + sessions.length + '</dd>' +
+      '<dt>total time</dt><dd>' + esc(dur(total)) + '</dd>' +
+      '<dt>median</dt><dd>' + esc(dur(med)) + '</dd></dl></div>' +
+    '<div class="block"><h4>How they ended</h4>' +
+      '<dl class="kv"><dt>closed normally</dt><dd>' + (sessions.length - crashed) + '</dd>' +
+      '<dt class="crashy">ended in a crash</dt><dd class="crashy">' + crashed + '</dd>' +
+      '<dt>crash rate</dt><dd>' +
+        (sessions.length ? Math.round((crashed / sessions.length) * 100) : 0) + '%</dd></dl></div>' +
+    '</div>';
 
   const table = '<table><thead><tr>' +
-    '<th>Ended</th><th>Sector</th><th>Depth</th><th>Outcome</th>' +
+    '<th>Last seen</th><th>Session</th><th>Played for</th><th>Mode</th>' +
+    '<th>Runs</th><th>Faults</th><th>Ended</th>' +
+    '</tr></thead><tbody>' +
+    sessions.map((s) =>
+      '<tr data-session="' + esc(s.session) + '">' +
+      '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
+      '<td>' + esc(s.session) +
+        (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</td>' +
+      '<td class="num">' + esc(dur(s.seconds)) + '</td>' +
+      '<td class="dim">' + esc(s.modes || "-") + '</td>' +
+      '<td>' + tally(s) + '</td>' +
+      '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
+      '<td>' + (s.ended_in_crash
+        ? '<span class="outcome-crashed">crashed</span>'
+        : '<span class="dim">closed</span>') + '</td>' +
+      '</tr>').join("") + '</tbody></table>';
+
+  return head + table;
+}
+
+// LEVELS TWO AND THREE: one session, its modes, and the runs inside them.
+async function viewOneSession() {
+  const q = new URLSearchParams({ session: state.session });
+  if (state.mode) q.set("mode", state.mode);
+  const { runs } = await api("/v1/runs?" + q.toString());
+
+  const crumb = '<p><button id="back">All sessions</button> ' +
+    '<span class="dim">session ' + esc(state.session) + '</span>' +
+    (state.mode ? ' <span class="dim">/</span> <button id="allmodes">' + esc(state.mode) + ' &times;</button>' : "") +
+    '</p>';
+
+  if (!runs.length) {
+    return crumb + '<div class="empty">This session finished no runs.' +
+      '<br><span class="dim">It was open long enough to ping, but nothing reached the end of a depth. ' +
+      'That is itself worth knowing.</span></div>';
+  }
+
+  // Level two: the modes present, as filters. Only shown when there is a
+  // choice to make, since one button that does nothing is worse than none.
+  const modes = [...new Set(runs.map((r) => r.mode).filter(Boolean))];
+  const modeBar = (!state.mode && modes.length > 1)
+    ? '<p class="dim">Mode: ' + modes.map((m) =>
+        '<button class="mode" data-mode="' + esc(m) + '">' + esc(m) + '</button>').join(" ") + '</p>'
+    : "";
+
+  const table = '<table><thead><tr>' +
+    '<th>Ended</th><th>Mode</th><th>Sector</th><th>Depth</th><th>Outcome</th>' +
     '<th>Wave</th><th>Time</th><th>Kills</th><th>Credits</th><th>Mech</th>' +
     '</tr></thead><tbody>' +
     runs.map((r) =>
       '<tr data-id="' + esc(r.id) + '">' +
       '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
+      '<td class="dim">' + esc(r.mode || "-") + '</td>' +
       '<td>' + esc(r.sector || "-") + '</td>' +
       '<td class="num">' + esc(r.depth == null ? "-" : r.depth) + '</td>' +
       '<td class="outcome-' + esc(r.outcome || "unknown") + '">' + esc(r.outcome || "-") + '</td>' +
@@ -275,7 +355,34 @@ async function viewRuns() {
       '<td class="num dim">' + esc(r.mech_level == null ? "-" : r.mech_level) + '</td>' +
       '</tr>').join("") + '</tbody></table>';
 
-  return bars + table;
+  // Median per depth, within this session and mode. Median rather than mean,
+  // because one run quit at twenty seconds drags a mean down and says nothing
+  // about how long a depth takes.
+  const byDepth = new Map();
+  for (const r of runs) {
+    const d = r.depth == null ? "?" : r.depth;
+    if (!byDepth.has(d)) byDepth.set(d, []);
+    byDepth.get(d).push(Number(r.seconds) || 0);
+  }
+  const median = (xs) => {
+    const v = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
+  };
+  const meds = [...byDepth.entries()]
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([d, xs]) => [d, median(xs), xs.length]);
+  const peak = Math.max(1, ...meds.map((m) => m[1]));
+  const bars = '<div class="card"><h2>Median time per depth</h2><div class="bars">' +
+    meds.map(([d, med, n]) =>
+      '<div class="bar-row"><span>Depth ' + esc(d) + '</span>' +
+      '<span class="bar-track"><span class="bar-fill" style="width:' +
+        Math.round((med / peak) * 100) + '%"></span></span>' +
+      '<span class="bar-val">' + esc(mmss(med)) + '</span>' +
+      '<span class="dim">' + n + ' run' + (n === 1 ? "" : "s") + '</span></div>').join("") +
+    '</div></div>';
+
+  return crumb + modeBar + bars + table;
 }
 
 // The blocks the mockup showed. Everything here is read out of the context field, so
@@ -400,14 +507,25 @@ async function render() {
     app.innerHTML = '<div class="card err">' + esc(err.message) + '</div>';
     return;
   }
+  // Back unwinds ONE level at a time, innermost first, so the button always
+  // does the thing the breadcrumb above it says it does.
   const back = document.getElementById("back");
   if (back) back.onclick = () => {
     if (state.report) state.report = null;
+    else if (state.session) { state.session = ""; state.mode = ""; }
     else { state.signature = ""; state.view = "signatures"; }
     render();
   };
+  const allmodes = document.getElementById("allmodes");
+  if (allmodes) allmodes.onclick = () => { state.mode = ""; render(); };
+  app.querySelectorAll("button.mode").forEach((b) => {
+    b.onclick = () => { state.mode = b.dataset.mode; render(); };
+  });
   app.querySelectorAll("tr[data-sig]").forEach((tr) => {
     tr.onclick = () => { state.signature = tr.dataset.sig; state.view = "reports"; render(); };
+  });
+  app.querySelectorAll("tr[data-session]").forEach((tr) => {
+    tr.onclick = () => { state.session = tr.dataset.session; state.mode = ""; render(); };
   });
   app.querySelectorAll("tr[data-id]").forEach((tr) => {
     tr.onclick = () => { state.report = tr.dataset.id; render(); };

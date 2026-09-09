@@ -17,7 +17,12 @@ const limiter = new RateLimiter({ burst: config.rateBurst, perMinute: config.rat
 // what the issue rollup counts, so adding a kind here without deciding which
 // side of that line it sits on is the mistake to avoid.
 export const FAULT_KINDS = ["crash", "error", "warning"];
-export const KINDS = [...FAULT_KINDS, "run"];
+// "session" is the heartbeat: the game pings every few minutes so a session
+// has a LENGTH whatever way it ends. A clean quit cannot report itself (the
+// process is leaving) and a crash reports on the next launch, so without this
+// "how long do people play" is answerable only for the sessions that crashed,
+// which is the worst possible sample to draw it from.
+export const KINDS = [...FAULT_KINDS, "run", "session"];
 
 function keyMatches(given, expected) {
   if (!expected) return false;
@@ -254,6 +259,21 @@ function handleRequest(req, res, url) {
     const q = url.searchParams;
     return send(res, 200, {
       runs: store.runs({
+        game: q.get("game") || undefined,
+        session: q.get("session") || undefined,
+        mode: q.get("mode") || undefined,
+        limit: q.get("limit") ? Number(q.get("limit")) : 100,
+      }),
+    });
+  }
+
+  // A playtest is read from the outside in: who played and for how long, then
+  // what they played, then how each run went. This is the outermost level.
+  if (path === "/v1/sessions" && req.method === "GET") {
+    if (!requireKey(req, res)) return undefined;
+    const q = url.searchParams;
+    return send(res, 200, {
+      sessions: store.sessions({
         game: q.get("game") || undefined,
         limit: q.get("limit") ? Number(q.get("limit")) : 100,
       }),

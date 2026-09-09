@@ -22,6 +22,7 @@ process.env.ID_SALT = "test-salt";
 process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
+const { adminPage } = await import("../src/admin.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -209,4 +210,85 @@ test("the issue list carries the depth span, which is what makes it scannable", 
   assert.equal(signatures[0].depth_min, 1);
   assert.equal(signatures[0].depth_max, 3);
   assert.equal(signatures[0].wave_max, 30);
+});
+
+// ---------------------------------------------------------------------------
+// Sessions: the outermost level of how a playtest gets read.
+//
+//   session -> campaign or survival -> a sector+depth run
+
+test("the page's own script parses", () => {
+  // Twice now a backtick inside a comment in src/admin.js has terminated the
+  // template literal the browser script lives in, and the failure is invisible
+  // from the server: adminPage() still returns a string, the page still serves
+  // 200, and the browser gets JavaScript that stops at the stray backtick. So
+  // this parses the script the page actually ships.
+  const html = adminPage();
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(m, "the page should carry a script");
+  // Function() compiles without running, which is exactly the check wanted.
+  assert.doesNotThrow(() => new Function(m[1]), "the browser script must parse");
+});
+
+test("a session is one row, with its length and how it ended", async () => {
+  const post = (body) => fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  // A session that played two campaign depths, won one, lost one, then died.
+  await post({ game: "pt", kind: "session", message: "played for 20m",
+    session: "sess-a", context: { session_sec: 1200, mode: "campaign" } });
+  await post({ game: "pt", kind: "run", message: "succeeded at depth 1",
+    session: "sess-a", context: { mode: "campaign", outcome: "succeeded", depth: 1, run_seconds: 438 } });
+  await post({ game: "pt", kind: "run", message: "failed at depth 2",
+    session: "sess-a", context: { mode: "campaign", outcome: "failed", depth: 2, run_seconds: 351 } });
+  // The crash that ends it is posted by the NEXT launch, carrying the dead
+  // session's id. That is what makes "ended in a crash" knowable at all.
+  await post({ game: "pt", kind: "crash", message: "Game did not shut down cleanly",
+    session: "sess-a", context: { detected_by: "session marker", session_sec: 1400 } });
+
+  const { sessions } = await fetch(`${base}/v1/sessions?game=pt`).then((r) => r.json());
+  const a = sessions.find((s) => s.session === "sess-a");
+  assert.ok(a, "the session should be listed");
+  assert.equal(a.seconds, 1400, "length is the furthest the game clocked, not the report spread");
+  assert.equal(a.runs, 2);
+  assert.equal(a.succeeded, 1);
+  assert.equal(a.failed, 1);
+  assert.equal(a.quit, 0);
+  assert.equal(a.ended_in_crash, 1, "the marker crash marks the session as crashed");
+  assert.equal(a.modes, "campaign");
+});
+
+test("a session that closed normally is not marked as crashed", async () => {
+  await fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "pt", kind: "session", message: "played for 5m",
+      session: "sess-b", context: { session_sec: 300, mode: "survival" } }),
+  });
+  const { sessions } = await fetch(`${base}/v1/sessions?game=pt`).then((r) => r.json());
+  const b = sessions.find((s) => s.session === "sess-b");
+  assert.equal(b.ended_in_crash, 0);
+  assert.equal(b.seconds, 300);
+  assert.equal(b.modes, "survival");
+});
+
+test("runs drill down by session, then by mode", async () => {
+  await fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "pt", kind: "run", message: "quit survival",
+      session: "sess-a", context: { mode: "survival", outcome: "quit", depth: 0, run_seconds: 90 } }),
+  });
+
+  const all = await fetch(`${base}/v1/runs?session=sess-a`).then((r) => r.json());
+  assert.equal(all.runs.length, 3, "every run in the session");
+
+  const camp = await fetch(`${base}/v1/runs?session=sess-a&mode=campaign`).then((r) => r.json());
+  assert.equal(camp.runs.length, 2, "only the campaign ones");
+  assert.ok(camp.runs.every((r) => r.mode === "campaign"));
+
+  const surv = await fetch(`${base}/v1/runs?session=sess-a&mode=survival`).then((r) => r.json());
+  assert.equal(surv.runs.length, 1);
+  assert.equal(surv.runs[0].outcome, "quit");
 });

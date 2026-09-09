@@ -204,16 +204,27 @@ export function openDatabase(dataDir) {
     // Run summaries, newest first. Separate from list() because a run is not a
     // fault and the columns worth seeing are different ones: how it ended, how
     // long it took, how far it got.
-    runs({ game, limit = 100 } = {}) {
+    runs({ game, session, mode, limit = 100 } = {}) {
       const args = { limit: Math.min(Math.max(1, limit), 500) };
       let filter = "WHERE kind = 'run'";
       if (game) {
         filter += " AND game = @game";
         args.game = game;
       }
+      // The two drill-down steps: into one session, then into one mode.
+      if (session) {
+        filter += " AND session = @session";
+        args.session = session;
+      }
+      if (mode) {
+        filter += " AND json_extract(context, '$.mode') = @mode";
+        args.mode = mode;
+      }
       return db
         .prepare(`
           SELECT id, received_at, game, version, message,
+                 session,
+                 json_extract(context, '$.mode')        AS mode,
                  json_extract(context, '$.outcome')     AS outcome,
                  json_extract(context, '$.depth')       AS depth,
                  json_extract(context, '$.sector_title') AS sector,
@@ -226,6 +237,52 @@ export function openDatabase(dataDir) {
           FROM reports
           ${filter}
           ORDER BY received_at DESC
+          LIMIT @limit
+        `)
+        .all(args);
+    },
+
+    // One row per play session: who, how long, what they played, how it ended.
+    //
+    // Length is MAX(session_sec) rather than last_seen - first_seen, because
+    // the second measures when reports happened to arrive and the first is
+    // what the game actually clocked. A session that sends one report at
+    // minute 90 is ninety minutes long, not zero.
+    //
+    // A session ENDED IN A CRASH if any report for it was raised from the
+    // session marker - that report is posted by the NEXT launch and carries
+    // the dead session's id, which is exactly what makes this knowable.
+    sessions({ game, limit = 100 } = {}) {
+      const args = { limit: Math.min(Math.max(1, limit), 500) };
+      let filter = "WHERE session <> ''";
+      if (game) {
+        filter += " AND game = @game";
+        args.game = game;
+      }
+      return db
+        .prepare(`
+          SELECT session,
+                 MAX(game)                   AS game,
+                 MAX(version)                AS version,
+                 MAX(player)                 AS player,
+                 MIN(received_at)            AS first_seen,
+                 MAX(received_at)            AS last_seen,
+                 MAX(COALESCE(json_extract(context, '$.session_sec'), 0)) AS seconds,
+                 MAX(COALESCE(json_extract(context, '$.channel'), '')) AS channel,
+                 -- What they played. A session can hold both, so this is the
+                 -- set rather than a single value.
+                 GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
+                 SUM(CASE WHEN kind = 'run' THEN 1 ELSE 0 END) AS runs,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
+                 SUM(CASE WHEN kind IN ('crash','error') THEN 1 ELSE 0 END) AS faults,
+                 MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
+                          THEN 1 ELSE 0 END) AS ended_in_crash
+          FROM reports
+          ${filter}
+          GROUP BY session
+          ORDER BY last_seen DESC
           LIMIT @limit
         `)
         .all(args);
