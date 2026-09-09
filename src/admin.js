@@ -1,8 +1,9 @@
 // The portal, as one self-contained page.
 //
 // Served without a key, because the page itself holds nothing: every number on
-// it comes from the read routes, and those want the admin key, which the page
-// asks for on arrival and keeps in sessionStorage - so it is gone when the tab
+// it comes from the read routes. Those are open while ADMIN_KEY is unset, so
+// the page just loads. When a key IS set they answer 401, and only then does
+// the page ask, keeping what it is given in sessionStorage - so it is gone when the tab
 // closes and is never in a URL, a cookie or the server's logs.
 //
 // No CDN and no build step. One file, and reading it is how you know what it
@@ -88,8 +89,18 @@ const ago = (ms) => {
 };
 
 async function api(path) {
-  const res = await fetch(path, { headers: { "x-api-key": key } });
-  if (res.status === 401) { key = ""; sessionStorage.removeItem(KEY); render(); throw new Error("unauthorized"); }
+  // No header at all when there is no key, which is what an open service
+  // wants. If the service is gated it answers 401 and render() puts the gate
+  // up; it must NOT call render() from in here, because with an empty key
+  // that is a 401 calling a render calling a 401 forever.
+  const res = await fetch(path, { headers: key ? { "x-api-key": key } : {} });
+  if (res.status === 401) {
+    key = "";
+    sessionStorage.removeItem(KEY);
+    const err = new Error("unauthorized");
+    err.unauthorized = true;
+    throw err;
+  }
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.json();
 }
@@ -118,11 +129,13 @@ function toolbar(active) {
     '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
-    '<button id="refresh">Refresh</button><button id="out">Forget key</button>';
+    '<button id="refresh">Refresh</button>' +
+    (key ? '<button id="out">Forget key</button>' : '');
   document.getElementById("nav-sig").onclick = () => { state.view = "signatures"; state.signature = ""; render(); };
   document.getElementById("nav-all").onclick = () => { state.view = "reports"; state.signature = ""; render(); };
   document.getElementById("refresh").onclick = render;
-  document.getElementById("out").onclick = () => { key = ""; sessionStorage.removeItem(KEY); render(); };
+  const out = document.getElementById("out");
+  if (out) out.onclick = () => { key = ""; sessionStorage.removeItem(KEY); render(); };
   const g = document.getElementById("game");
   g.onchange = () => { state.game = g.value.trim(); render(); };
   void active;
@@ -189,7 +202,10 @@ async function viewReport(id) {
 }
 
 async function render() {
-  if (!key) return gate("");
+  // No key check here on the way in. The service decides whether it wants one,
+  // and it says so with a 401; asking the visitor for a key the service is not
+  // going to check is how an open portal ends up looking shut.
+  const tried = key;
   toolbar(state.view);
   app.innerHTML = '<div class="empty">Loading...</div>';
   try {
@@ -197,7 +213,7 @@ async function render() {
     else if (state.view === "reports" || state.signature) app.innerHTML = await viewReports();
     else app.innerHTML = await viewSignatures();
   } catch (err) {
-    if (String(err.message) === "unauthorized") return;
+    if (err.unauthorized) return gate(tried ? "That key was not accepted." : "");
     app.innerHTML = '<div class="card err">' + esc(err.message) + '</div>';
     return;
   }

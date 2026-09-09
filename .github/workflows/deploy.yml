@@ -193,6 +193,13 @@ jobs:
           stage_secret ADMIN_KEY  "${ADMIN_KEY}"
           stage_secret ID_SALT    "${ID_SALT}"
 
+          # Names and digests only; `fly secrets list` never prints a value.
+          # Worth having in the log because a secret set by hand months ago is
+          # otherwise invisible, and one of them decides whether the portal
+          # opens.
+          echo "--- secrets this app holds ---"
+          flyctl secrets list --app "$APP" || true
+
       # Fly's remote builder and API drop connections transiently, which makes
       # `flyctl deploy` fail in a few seconds before any build output at all.
       # Retry with exponential backoff, the same doctrine this project already
@@ -302,9 +309,30 @@ jobs:
           # when it is empty, which is exactly what an open service wants.
           INGEST_KEY: ${{ secrets.INGEST_KEY }}
 
-      - name: Confirm the portal is being served
+      # Not just "the portal is served" - that was true the whole time it was
+      # asking for a key nobody had. What is checked is that the READ ROUTES
+      # answer without one, because that is what "let me view the data" means
+      # and it is the half a page render cannot prove.
+      - name: The portal is open, and its data with it
         run: |
-          code=$(curl -s -o /tmp/admin.html -w '%{http_code}' --max-time 20 "$URL/admin")
+          code=$(curl -s -o /tmp/admin.html -w '%{http_code}' --max-time 20 "$URL/")
           test "$code" = "200" || { echo "portal returned $code"; exit 1; }
-          grep -q "ADMIN_KEY" /tmp/admin.html || { echo "portal did not render its key prompt"; exit 1; }
-          echo "portal is up and asks for a key"
+
+          code=$(curl -s -o /tmp/sig.json -w '%{http_code}' --max-time 20 "$URL/v1/signatures")
+          if [ "$code" = "401" ]; then
+            echo
+            echo "The read routes are still gated, so ADMIN_KEY is set as a Fly secret."
+            echo "The code no longer requires one; the live secret does. Clear it with:"
+            echo "    fly secrets unset ADMIN_KEY -a games-reporting"
+            exit 1
+          fi
+          test "$code" = "200" || { echo "/v1/signatures returned $code"; cat /tmp/sig.json; exit 1; }
+          echo "issues readable with no key: $(cat /tmp/sig.json | head -c 400)"
+
+          # The one route that must NOT be open. 403 is "no key is set so this
+          # is off"; 401 would mean a key is set, which the check above rules
+          # out. Anything else means a stranger can empty the database.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            -X DELETE "$URL/v1/reports/00000000-0000-0000-0000-000000000000")
+          test "$code" = "403" || { echo "DELETE answered $code; it must not be open"; exit 1; }
+          echo "and deleting is off, as it should be"
