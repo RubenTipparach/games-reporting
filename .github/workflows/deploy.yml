@@ -46,8 +46,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # An app with no allocated IP has a hostname that resolves nowhere, while
+      # every other part of a deploy still reports success. That is what the
+      # first two runs of this workflow hit: the deploy said "Visit your newly
+      # deployed app at https://games-reporting.fly.dev/" and every request to
+      # it returned curl 000, because `fly apps create` does not allocate one.
+      #
+      # Both of these are free (a SHARED v4, not a dedicated one) and both are
+      # no-ops once they exist, so this runs on every deploy rather than being
+      # a thing somebody has to remember once.
+      - name: Make sure the app has an address
+        run: |
+          if flyctl ips list -a games-reporting | grep -qE '\bv6\b'; then
+            echo "v6 already allocated"
+          else
+            echo "allocating v6"
+            flyctl ips allocate-v6 -a games-reporting
+          fi
+          if flyctl ips list -a games-reporting | grep -qE '\bv4\b'; then
+            echo "v4 already allocated"
+          else
+            echo "allocating a shared v4 (free; a dedicated one is not)"
+            flyctl ips allocate-v4 --shared -a games-reporting
+          fi
+          flyctl ips list -a games-reporting
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Deploy
         run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # A machine that crash-looped to its max restart count stays stopped even
+      # once a good image is deployed over it, so a deploy that fixes the crash
+      # still leaves the app down. Nudging it is harmless when it is already
+      # healthy and is the difference between fixed and fixed-but-still-dead
+      # when it is not.
+      - name: Start the machines
+        run: flyctl machine start -a games-reporting || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -66,18 +104,15 @@ jobs:
           node-version: "22"
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # An app with no allocated IP has a hostname that resolves to nothing,
-      # and every request to it fails in a way that looks exactly like a
-      # crashed app. `fly apps create` does not allocate one, so this is worth
-      # ruling out before reading a single line of application log.
+      # The deploy job allocates these; this is the independent check that it
+      # actually happened, because an unrouted app fails in a way that looks
+      # exactly like a crashed one and the two want different fixes.
       - name: The app has an address to be reached at
         run: |
           flyctl ips list -a games-reporting | tee /tmp/ips.txt
           grep -qE '\bv4\b|\bv6\b' /tmp/ips.txt || {
             echo
-            echo "NO IP ALLOCATED. The hostname cannot route anywhere. Fix with:"
-            echo "  fly ips allocate-v6 -a games-reporting"
-            echo "  fly ips allocate-v4 --shared -a games-reporting"
+            echo "STILL NO IP after the deploy job tried to allocate one."
             exit 1
           }
 
