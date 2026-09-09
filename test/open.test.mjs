@@ -145,3 +145,68 @@ test("a genuinely unknown kind is still filed as an error, not rejected", async 
   const { id } = await res.json();
   assert.equal(store.get(id).kind, "error");
 });
+
+// ---------------------------------------------------------------------------
+// The Runs view's data. The portal reads these columns out of the context JSON
+// rather than out of real columns, so a change to what the game sends shows up
+// here rather than as an empty table nobody notices.
+
+test("a run summary comes back on /v1/runs with its columns unpacked", async () => {
+  await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike",
+      version: "abc1234",
+      kind: "run",
+      message: "cleared at depth 2 after 10m 02s",
+      context: {
+        outcome: "cleared", depth: 2, sector_title: "Dust Hive",
+        run_seconds: 602, wave_number: 10, difficulty_wave: 20,
+        kills: 602, credits: 3110, mech: { level: 12, role: "Combat" },
+      },
+    }),
+  });
+  const { runs } = await fetch(`${base}/v1/runs?game=mining-mike`).then((r) => r.json());
+  const run = runs.find((r) => r.outcome === "cleared");
+  assert.ok(run, "the run should be listed");
+  assert.equal(run.depth, 2);
+  assert.equal(run.sector, "Dust Hive");
+  assert.equal(run.seconds, 602);
+  assert.equal(run.kills, 602);
+  assert.equal(run.credits, 3110);
+  assert.equal(run.mech_level, 12, "read out of the nested mech object");
+});
+
+test("and faults do not appear in it", async () => {
+  const { runs } = await fetch(`${base}/v1/runs`).then((r) => r.json());
+  assert.ok(runs.every((r) => r.outcome !== undefined || r.depth !== undefined),
+    "only run-kind rows come back");
+  const ids = new Set(runs.map((r) => r.id));
+  const { reports } = await fetch(`${base}/v1/reports?kind=crash`).then((r) => r.json());
+  for (const c of reports) {
+    assert.ok(!ids.has(c.id), "a crash must not be listed as a run");
+  }
+});
+
+test("the issue list carries the depth span, which is what makes it scannable", async () => {
+  // Same fault at two different depths: the span should widen rather than
+  // showing only the most recent.
+  for (const depth of [1, 3]) {
+    await fetch(`${base}/v1/reports`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        game: "span-test",
+        kind: "crash",
+        message: "A fault seen at more than one depth",
+        context: { depth, difficulty_wave: depth * 10 },
+      }),
+    });
+  }
+  const { signatures } = await fetch(`${base}/v1/signatures?game=span-test`).then((r) => r.json());
+  assert.equal(signatures.length, 1);
+  assert.equal(signatures[0].depth_min, 1);
+  assert.equal(signatures[0].depth_max, 3);
+  assert.equal(signatures[0].wave_max, 30);
+});

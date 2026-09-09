@@ -246,6 +246,20 @@ function handleRequest(req, res, url) {
     });
   }
 
+  // Runs are their own listing, not a filter on the fault list, because the
+  // columns worth seeing are different: how it ended, how long it took, how
+  // far it got. Same read flag as everything else.
+  if (path === "/v1/runs" && req.method === "GET") {
+    if (!requireKey(req, res)) return undefined;
+    const q = url.searchParams;
+    return send(res, 200, {
+      runs: store.runs({
+        game: q.get("game") || undefined,
+        limit: q.get("limit") ? Number(q.get("limit")) : 100,
+      }),
+    });
+  }
+
   const one = path.match(/^\/v1\/reports\/([A-Za-z0-9-]+)$/);
   if (one) {
     if (req.method === "GET") {

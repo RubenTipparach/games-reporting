@@ -179,6 +179,15 @@ export function openDatabase(dataDir) {
                  MAX(received_at)        AS last_seen,
                  COUNT(DISTINCT session) AS sessions,
                  COUNT(DISTINCT CASE WHEN player <> '' THEN player END) AS players,
+                 -- The depth span, read out of the context JSON. This is the
+                 -- column that changes how the list gets used: a crash only
+                 -- ever seen at depth 3 is a lead, and one seen everywhere is
+                 -- not. SQLite reads JSON in place, so nothing had to be
+                 -- promoted to a real column to sort on it.
+                 MIN(json_extract(context, '$.depth')) AS depth_min,
+                 MAX(json_extract(context, '$.depth')) AS depth_max,
+                 MIN(json_extract(context, '$.difficulty_wave')) AS wave_min,
+                 MAX(json_extract(context, '$.difficulty_wave')) AS wave_max,
                  GROUP_CONCAT(DISTINCT version) AS versions,
                  MAX(game)               AS game,
                  MAX(kind)               AS kind,
@@ -187,6 +196,36 @@ export function openDatabase(dataDir) {
           ${filter}
           GROUP BY signature
           ORDER BY last_seen DESC
+          LIMIT @limit
+        `)
+        .all(args);
+    },
+
+    // Run summaries, newest first. Separate from list() because a run is not a
+    // fault and the columns worth seeing are different ones: how it ended, how
+    // long it took, how far it got.
+    runs({ game, limit = 100 } = {}) {
+      const args = { limit: Math.min(Math.max(1, limit), 500) };
+      let filter = "WHERE kind = 'run'";
+      if (game) {
+        filter += " AND game = @game";
+        args.game = game;
+      }
+      return db
+        .prepare(`
+          SELECT id, received_at, game, version, message,
+                 json_extract(context, '$.outcome')     AS outcome,
+                 json_extract(context, '$.depth')       AS depth,
+                 json_extract(context, '$.sector_title') AS sector,
+                 json_extract(context, '$.run_seconds') AS seconds,
+                 json_extract(context, '$.wave_number') AS wave,
+                 json_extract(context, '$.kills')       AS kills,
+                 json_extract(context, '$.credits')     AS credits,
+                 json_extract(context, '$.mech.level')  AS mech_level,
+                 player
+          FROM reports
+          ${filter}
+          ORDER BY received_at DESC
           LIMIT @limit
         `)
         .all(args);

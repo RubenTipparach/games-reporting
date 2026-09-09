@@ -48,6 +48,26 @@ th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: upper
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #1b2029; }
 .count { font-weight: 700; }
+/* The Runs view and the context blocks, per the reviewed mockup. */
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.where { color: #6fd08c; white-space: nowrap; }
+.bars { display: grid; gap: 9px; }
+.bar-row { display: grid; grid-template-columns: 84px 1fr 70px 68px; gap: 12px; align-items: center; }
+.bar-track { background: #10151c; border: 1px solid var(--line); border-radius: 2px; height: 17px; position: relative; overflow: hidden; }
+.bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .55; }
+.bar-val { text-align: right; font-variant-numeric: tabular-nums; }
+.blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
+.block { background: var(--panel); padding: 14px 16px; display: grid; gap: 8px; align-content: start; }
+.block h4 { margin: 0; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+.block .kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 14px; font-size: 12px; }
+.block .kv dt { color: var(--dim); }
+.block .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+/* Outcome is state, so it reads at a glance rather than as another word. */
+.outcome-cleared   { color: #6fd08c; }
+.outcome-died      { color: var(--crash); }
+.outcome-crashed   { color: var(--crash); font-weight: 600; }
+.outcome-abandoned { color: var(--warn); }
+.outcome-redeploy  { color: var(--error); }
 .kind-crash { color: var(--crash); }
 .kind-error { color: var(--error); }
 .kind-warning { color: var(--warn); }
@@ -126,6 +146,7 @@ function gate(msg) {
 function toolbar(active) {
   bar.innerHTML =
     '<button id="nav-sig">Issues</button><button id="nav-all">All reports</button>' +
+    '<button id="nav-runs">Runs</button>' +
     '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
@@ -133,6 +154,7 @@ function toolbar(active) {
     (key ? '<button id="out">Forget key</button>' : '');
   document.getElementById("nav-sig").onclick = () => { state.view = "signatures"; state.signature = ""; render(); };
   document.getElementById("nav-all").onclick = () => { state.view = "reports"; state.signature = ""; render(); };
+  document.getElementById("nav-runs").onclick = () => { state.view = "runs"; state.signature = ""; state.report = null; render(); };
   document.getElementById("refresh").onclick = render;
   const out = document.getElementById("out");
   if (out) out.onclick = () => { key = ""; sessionStorage.removeItem(KEY); render(); };
@@ -143,17 +165,37 @@ function toolbar(active) {
 
 const state = { view: "signatures", game: "", signature: "", report: null };
 
+// Seconds as something a person reads. Runs are minutes, not hours.
+function mmss(sec) {
+  const n = Number(sec) || 0;
+  return Math.floor(n / 60) + "m " + String(n % 60).padStart(2, "0") + "s";
+}
+
+// The depth span for an issue, which is the thing worth scanning the list for:
+// one depth is a lead, every depth is not. Null when no report carried a depth,
+// which is every report from the menu.
+function where(s) {
+  if (s.depth_min == null) return "-";
+  if (s.depth_min === 0 && s.depth_max === 0) return "menu";
+  if (s.depth_min === s.depth_max) {
+    const w = s.wave_max != null ? " w" + s.wave_max : "";
+    return "d" + s.depth_min + w;
+  }
+  return "d" + s.depth_min + "-d" + s.depth_max;
+}
+
 async function viewSignatures() {
   const q = state.game ? "?game=" + encodeURIComponent(state.game) : "";
   const { signatures } = await api("/v1/signatures" + q);
   if (!signatures.length) return '<div class="empty">Nothing reported yet.</div>';
-  return '<table><thead><tr><th>Count</th><th>Players</th><th>What</th><th>Versions</th><th>Last seen</th></tr></thead><tbody>' +
+  return '<table><thead><tr><th>Count</th><th>Players</th><th>What</th><th>Where</th><th>Versions</th><th>Last seen</th></tr></thead><tbody>' +
     signatures.map((s) =>
       '<tr data-sig="' + esc(s.signature) + '">' +
       '<td class="count">' + s.count + '</td>' +
       '<td>' + (s.players || "-") + '<span class="dim"> / ' + s.sessions + ' sess</span></td>' +
       '<td><span class="kind-' + esc(s.kind) + '">' + esc(s.kind) + '</span> ' +
       '<span class="title">' + esc(s.title) + '</span><br><span class="dim">' + esc(s.game) + " " + esc(s.signature) + '</span></td>' +
+      '<td class="where">' + esc(where(s)) + '</td>' +
       '<td class="dim">' + esc(s.versions || "-") + '</td>' +
       '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
       '</tr>').join("") + '</tbody></table>';
@@ -178,10 +220,149 @@ async function viewReports() {
       '</tr>').join("") + '</tbody></table>';
 }
 
+// The pacing view. A run summary arrives at the end of every depth, cleared or
+// not, and the ones that went FINE are the point: timings drawn only from the
+// attempts that broke describe the breakages rather than the pacing.
+async function viewRuns() {
+  const q = state.game ? "?game=" + encodeURIComponent(state.game) : "";
+  const { runs } = await api("/v1/runs" + q);
+  if (!runs.length) {
+    return '<div class="empty">No runs reported yet.' +
+      '<br><span class="dim">The game posts one at the end of every depth. ' +
+      'Nothing here means no build has finished a depth yet.</span></div>';
+  }
+
+  // Median, not mean: one abandoned run at twenty seconds drags a mean down
+  // and says nothing about how long a depth takes.
+  const byDepth = new Map();
+  for (const r of runs) {
+    const d = r.depth == null ? "?" : r.depth;
+    if (!byDepth.has(d)) byDepth.set(d, []);
+    byDepth.get(d).push(Number(r.seconds) || 0);
+  }
+  const rows = [...byDepth.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  const median = (xs) => {
+    const v = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
+  };
+  const medians = rows.map(([d, xs]) => [d, median(xs), xs.length]);
+  const peak = Math.max(1, ...medians.map((m) => m[1]));
+
+  const bars = '<div class="card"><h2>Median time per depth</h2><div class="bars">' +
+    medians.map(([d, med, n]) =>
+      '<div class="bar-row"><span>Depth ' + esc(d) + '</span>' +
+      '<span class="bar-track"><span class="bar-fill" style="width:' +
+        Math.round((med / peak) * 100) + '%"></span></span>' +
+      '<span class="bar-val">' + esc(mmss(med)) + '</span>' +
+      '<span class="dim">' + n + ' run' + (n === 1 ? "" : "s") + '</span></div>').join("") +
+    '</div></div>';
+
+  const table = '<table><thead><tr>' +
+    '<th>Ended</th><th>Sector</th><th>Depth</th><th>Outcome</th>' +
+    '<th>Wave</th><th>Time</th><th>Kills</th><th>Credits</th><th>Mech</th>' +
+    '</tr></thead><tbody>' +
+    runs.map((r) =>
+      '<tr data-id="' + esc(r.id) + '">' +
+      '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
+      '<td>' + esc(r.sector || "-") + '</td>' +
+      '<td class="num">' + esc(r.depth == null ? "-" : r.depth) + '</td>' +
+      '<td class="outcome-' + esc(r.outcome || "unknown") + '">' + esc(r.outcome || "-") + '</td>' +
+      '<td class="num dim">' + esc(r.wave == null ? "-" : r.wave) + '</td>' +
+      '<td class="num">' + esc(mmss(r.seconds)) + '</td>' +
+      '<td class="num dim">' + esc(r.kills == null ? "-" : r.kills) + '</td>' +
+      '<td class="num dim">' + esc(r.credits == null ? "-" : r.credits) + '</td>' +
+      '<td class="num dim">' + esc(r.mech_level == null ? "-" : r.mech_level) + '</td>' +
+      '</tr>').join("") + '</tbody></table>';
+
+  return bars + table;
+}
+
+// The blocks the mockup showed. Everything here is read out of the context field, so
+// the service never had to learn what a mech is: it stores the JSON, the page
+// knows the shape, and a field the game stops sending simply stops appearing.
+function ctxBlocks(c) {
+  if (!c || typeof c !== "object") return "";
+  const has = (k) => c[k] !== undefined && c[k] !== null && c[k] !== "";
+  const kv = (pairs) => '<dl class="kv">' +
+    pairs.filter((p) => p[1] !== null && p[1] !== undefined && p[1] !== "")
+      .map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + esc(String(p[1])) + '</dd>').join("") +
+    '</dl>';
+
+  const blocks = [];
+
+  if (has("session_sec") || has("run") || has("run_sec")) {
+    blocks.push(['Session', kv([
+      ["playing for", has("session_sec") ? mmss(c.session_sec) : null],
+      ["run", c.run],
+      ["run length", has("run_sec") ? mmss(c.run_sec) : null],
+      ["channel", c.channel],
+      ["commit", c.commit],
+    ])]);
+  }
+
+  if (has("screen") || has("depth") || has("wave_number")) {
+    blocks.push(['Where', kv([
+      ["screen", c.screen],
+      ["sector", c.sector_title],
+      ["depth", c.depth],
+      // Both numbers, always, and labelled so nobody has to remember which is
+      // which. They are deliberately different and conflating them is the most
+      // repeated bug in this game.
+      ["wave shown", c.wave_number],
+      ["difficulty wave", c.difficulty_wave],
+      ["co-op", c.coop === undefined ? null : (c.coop ? "yes" : "solo")],
+    ])]);
+  }
+
+  if (c.mech && typeof c.mech === "object") {
+    const m = c.mech;
+    const picks = m.upgrades && typeof m.upgrades === "object"
+      ? Object.entries(m.upgrades).filter(([, v]) => v > 0) : [];
+    const guns = m.weapons && typeof m.weapons === "object" ? Object.entries(m.weapons) : [];
+    blocks.push(['Mech', kv([
+      ["role", m.role],
+      ["level", m.level],
+      ["hp", m.hp],
+      ...picks.map(([k, v]) => [k, v]),
+      ...guns.map(([k, v]) => [k, "tier " + v]),
+    ])]);
+  }
+
+  if (has("kills") || has("credits") || has("prestige")) {
+    blocks.push(['Run', kv([
+      ["kills", c.kills],
+      ["credits", c.credits],
+      ["prestige", c.prestige],
+      ["aliens alive", c.aliens_alive],
+      ["outcome", c.outcome],
+    ])]);
+  }
+
+  if (has("fps") || has("cpu") || has("renderer")) {
+    blocks.push(['Machine', kv([
+      ["fps", c.fps],
+      ["cpu", c.cpu],
+      ["cores", c.cores],
+      ["renderer", c.renderer],
+      ["window", c.window],
+    ])]);
+  }
+
+  if (!blocks.length) return "";
+  return '<div class="blocks">' + blocks.map(([h, body]) =>
+    '<div class="block"><h4>' + esc(h) + '</h4>' + body + '</div>').join("") + '</div>';
+}
+
 async function viewReport(id) {
   const r = await api("/v1/reports/" + encodeURIComponent(id));
   let ctx = r.context;
-  try { ctx = JSON.stringify(JSON.parse(r.context), null, 2); } catch (e) { void e; }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(r.context);
+    ctx = JSON.stringify(parsed, null, 2);
+  } catch (e) { void e; }
+  const blocks = ctxBlocks(parsed);
   return '<p><button id="back">Back</button></p>' +
     '<div class="card"><h2>' + esc(r.kind) + '</h2>' +
     '<dl class="kv">' +
@@ -197,7 +378,8 @@ async function viewReport(id) {
     '</dl></div>' +
     (r.message ? '<div class="card"><h2>Message</h2><pre>' + esc(r.message) + '</pre></div>' : "") +
     (r.stack ? '<div class="card"><h2>Stack</h2><pre>' + esc(r.stack) + '</pre></div>' : "") +
-    (ctx && ctx !== "{}" ? '<div class="card"><h2>Context</h2><pre>' + esc(ctx) + '</pre></div>' : "") +
+    blocks +
+    (ctx && ctx !== "{}" ? '<div class="card"><h2>Context, raw</h2><pre>' + esc(ctx) + '</pre></div>' : "") +
     (r.log ? '<div class="card"><h2>Log tail</h2><pre>' + esc(r.log) + '</pre></div>' : "");
 }
 
@@ -210,6 +392,7 @@ async function render() {
   app.innerHTML = '<div class="empty">Loading...</div>';
   try {
     if (state.report) app.innerHTML = await viewReport(state.report);
+    else if (state.view === "runs") app.innerHTML = await viewRuns();
     else if (state.view === "reports" || state.signature) app.innerHTML = await viewReports();
     else app.innerHTML = await viewSignatures();
   } catch (err) {
