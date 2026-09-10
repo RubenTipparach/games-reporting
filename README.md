@@ -67,6 +67,34 @@ volume keeps the database across both the sleep and a deploy.
 
 ## Routes
 
+### Pages, and sharing one
+
+Every view the portal can draw has an address of its own, so "look at this
+crash" is a link rather than a set of directions. Paste one to somebody and it
+opens on the thing you were looking at.
+
+| Address | What it opens on |
+| --- | --- |
+| `/` or `/issues` | The issue rollup, which is the front page |
+| `/issues/<signature>` | The reports behind one issue |
+| `/reports` | Every report, newest first |
+| `/reports/<id>` | One report in full, with its stack, context and log |
+| `/sessions` | Every session, with the playtime totals |
+| `/sessions/<session>` | One session: its runs and how far they got |
+| `/sessions/<session>/<mode>` | The same, narrowed to campaign or survival |
+
+Add `?game=mining-mike` to any of them to filter, which the toolbar's filter box
+does for you and which then rides along as you click deeper. **Copy link** in
+the top right puts the current address on the clipboard; the browser's back and
+forward buttons work, and so do right-click → copy link address and ctrl-click
+to open a row in a new tab.
+
+A link into a service with `ADMIN_KEY` set asks whoever opened it for the key
+first and then lands on the view it pointed at, so sharing one is not a way
+around the key.
+
+### The API
+
 | Route | Key | What it does |
 | --- | --- | --- |
 | `GET /healthz` | none | Liveness, plus how many reports are held |
@@ -74,6 +102,8 @@ volume keeps the database across both the sleep and a deploy.
 | `GET /v1/reports` | admin | List, newest first |
 | `GET /v1/reports/:id` | admin | One report, in full, with its log |
 | `GET /v1/signatures` | admin | One row per distinct crash, with counts |
+| `GET /v1/sessions` | admin | One row per session, with playtime and outcome |
+| `GET /v1/runs` | admin | Run summaries, filterable by session and mode |
 | `DELETE /v1/reports/:id` | admin | Drop one |
 
 ### Posting a report
@@ -183,7 +213,8 @@ npm install
 DATA_DIR=./data npm start
 ```
 
-Then open <http://localhost:8080>. It loads straight into the reports. Add
+Then open <http://localhost:8080>. It loads straight into the reports, and
+every view it draws has an address you can copy out of the bar. Add
 `ADMIN_KEY=dev` to that command to try the locked-down side, and the page will
 ask for `dev` instead.
 
@@ -193,11 +224,11 @@ ask for `dev` instead.
 npm test
 ```
 
-Twenty one checks, driving the real server over real HTTP against a temporary
+Driving the real server over real HTTP against a temporary
 database. Nothing is stubbed, so a pass means `fly deploy` is deploying
 something that works: posting open and posting closed (the second in its own
 file, since the choice is read once at boot), reading refused without the admin
 key, grouping across builds and machines, Steam ids provably absent from the
 stored row, distinct players counted without being named, the portal holding no
-data of its own, the body cap, the rate limit and its refill, the log tail, and
-the refusals.
+data of its own, the body cap, the rate limit and its refill, the log tail, the
+refusals, and every page address round-tripping to the view it names.

@@ -35,12 +35,22 @@ header {
 h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .spacer { flex: 1; }
 main { padding: 20px; max-width: 1200px; }
-button, select, input {
+button, select, input, a.btn {
   font: inherit; color: var(--text); background: #10141a;
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
 }
 button { cursor: pointer; }
-button:hover { border-color: var(--accent); }
+button:hover, a.btn:hover { border-color: var(--accent); }
+/* Every navigation on the page is a real link, so that right-click offers
+   "copy link address" and ctrl-click opens a tab. These are the ones that used
+   to be buttons and should still read as buttons. */
+a.btn { cursor: pointer; text-decoration: none; display: inline-block; line-height: 1.2; }
+a.btn.on { border-color: var(--accent); color: var(--accent); }
+a { color: var(--accent); }
+/* Inside a table the link is the whole row's job; it should not announce
+   itself as a second, differently coloured thing. */
+td a { color: inherit; text-decoration: none; }
+.crumb { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 button.primary { background: var(--accent); color: #08101a; border-color: var(--accent); font-weight: 600; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -68,7 +78,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .outcome-quit      { color: var(--warn); }
 .outcome-crashed   { color: var(--crash); font-weight: 600; }
 .crashy            { color: var(--crash); }
-button.mode        { padding: 3px 8px; font-size: 12px; }
+a.btn.mode         { padding: 3px 8px; font-size: 12px; }
 .kind-crash { color: var(--crash); }
 .kind-error { color: var(--error); }
 .kind-warning { color: var(--warn); }
@@ -144,34 +154,165 @@ function gate(msg) {
   document.getElementById("k").onkeydown = (e) => { if (e.key === "Enter") submit(); };
 }
 
-function toolbar(active) {
+// ---------------------------------------------------------------------------
+// Addresses.
+//
+// Everything on screen is decided by 'state', and every field of state is in
+// the URL, so a view can be pasted into a chat and open on the same thing for
+// whoever clicks it. The traffic is one-way on purpose - navigate() writes the
+// address, readUrl() reads it back into state, and nothing else touches state
+// - because two things allowed to change it separately is how a shared link
+// ends up showing something other than what it was copied from.
+//
+// 'session' and 'mode' are the two drill-down steps. Empty means "not drilled
+// in yet", so the same view renders all three levels and a crumb just clears
+// one of them.
+const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
+
+// state -> address. Innermost first, since each view is the one above it with
+// one more thing chosen.
+function href(s) {
+  const seg = encodeURIComponent;
+  let path;
+  if (s.report) path = "/reports/" + seg(s.report);
+  else if (s.view === "runs") {
+    path = "/sessions" +
+      (s.session ? "/" + seg(s.session) : "") +
+      (s.session && s.mode ? "/" + seg(s.mode) : "");
+  } else if (s.signature) path = "/issues/" + seg(s.signature);
+  else if (s.view === "reports") path = "/reports";
+  else path = "/issues";
+  return path + (s.game ? "?game=" + seg(s.game) : "");
+}
+
+// A link to one view, from where we are now. The game filter rides along
+// unless it is overridden: dropping it on the way into an issue is how you end
+// up reading another game's reports without noticing.
+function to(patch) {
+  return href(Object.assign(
+    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "" },
+    patch));
+}
+
+// address -> state, which is the half that makes a cold link work: nothing
+// about the view is remembered anywhere else, so this is all it takes to open
+// on somebody else's screenful.
+function readUrl() {
+  let parts = [];
+  try {
+    parts = location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch (e) { void e; } // a hand-mangled %-escape just lands on the default view
+  const next = {
+    view: "signatures",
+    game: new URLSearchParams(location.search).get("game") || "",
+    signature: "", report: null, session: "", mode: "",
+  };
+  if (parts[0] === "reports") {
+    next.view = "reports";
+    if (parts[1]) next.report = parts[1];
+  } else if (parts[0] === "sessions") {
+    next.view = "runs";
+    next.session = parts[1] || "";
+    // A mode with no session to hang it on is not a view; it would render the
+    // whole session list under a filter nothing shows.
+    next.mode = next.session ? (parts[2] || "") : "";
+  } else if (parts[0] === "issues" && parts[1]) {
+    next.view = "reports";
+    next.signature = parts[1];
+  }
+  Object.assign(state, next);
+}
+
+function navigate(url) {
+  if (url !== location.pathname + location.search) history.pushState(null, "", url);
+  readUrl();
+  render();
+}
+
+// One handler for every link on the page, rather than one per link redrawn on
+// every render. Plain clicks are routed here; a click with a modifier is left
+// entirely alone, so ctrl-click still opens a new tab and right-click still
+// offers "copy link address", which is most of the point of having addresses.
+document.addEventListener("click", (e) => {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const a = e.target.closest && e.target.closest('a[href^="/"]');
+  if (!a) return;
+  e.preventDefault();
+  navigate(a.getAttribute("href"));
+});
+
+// The back and forward buttons, which now work, because there is something for
+// them to go back to.
+addEventListener("popstate", () => { readUrl(); render(); });
+
+// The tab's name, so a row of them can be told apart and a bookmark says what
+// it points at.
+function pageTitle() {
+  const short = (v) => String(v).slice(0, 12);
+  if (state.report) return "Report " + short(state.report);
+  if (state.view === "runs") return state.session ? "Session " + short(state.session) : "Sessions";
+  if (state.signature) return "Issue " + short(state.signature);
+  if (state.view === "reports") return "Reports";
+  return "Issues";
+}
+
+// The address bar already holds it, but a button that puts it on the clipboard
+// is the difference between "look at this crash" being one click and being an
+// explanation.
+function copyLink() {
+  const url = location.href;
+  const said = (msg) => {
+    const el = document.getElementById("status");
+    if (!el) return;
+    el.textContent = msg;
+    setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 2000);
+  };
+  const manual = () => {
+    // No clipboard API on a page served over plain http, which is exactly how
+    // this runs locally, so fall back to the old select-and-copy.
+    const t = document.createElement("textarea");
+    t.value = url;
+    t.setAttribute("readonly", "");
+    t.style.position = "fixed";
+    t.style.opacity = "0";
+    document.body.appendChild(t);
+    t.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { void e; }
+    t.remove();
+    said(ok ? "Link copied" : "Copy it from the address bar");
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(() => said("Link copied"), manual);
+  } else manual();
+}
+
+function toolbar() {
+  const nav = (label, patch, on) =>
+    '<a class="btn' + (on ? " on" : "") + '" href="' + esc(to(patch)) + '">' + label + '</a>';
+  const onReports = state.view === "reports" && !state.signature;
   bar.innerHTML =
-    '<button id="nav-sig">Issues</button><button id="nav-all">All reports</button>' +
-    '<button id="nav-runs">Sessions</button>' +
+    nav("Issues", { view: "signatures" }, state.view === "signatures" || !!state.signature) +
+    nav("All reports", { view: "reports" }, onReports || !!state.report) +
+    nav("Sessions", { view: "runs" }, state.view === "runs") +
     '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
+    '<button id="share" title="Copy the address of what is on screen">Copy link</button>' +
     '<button id="refresh">Refresh</button>' +
     (key ? '<button id="out">Forget key</button>' : '');
-  document.getElementById("nav-sig").onclick = () => { state.view = "signatures"; state.signature = ""; render(); };
-  document.getElementById("nav-all").onclick = () => { state.view = "reports"; state.signature = ""; render(); };
-  document.getElementById("nav-runs").onclick = () => {
-    state.view = "runs"; state.signature = ""; state.report = null;
-    state.session = ""; state.mode = "";
-    render();
-  };
+  document.getElementById("share").onclick = copyLink;
   document.getElementById("refresh").onclick = render;
   const out = document.getElementById("out");
   if (out) out.onclick = () => { key = ""; sessionStorage.removeItem(KEY); render(); };
   const g = document.getElementById("game");
-  g.onchange = () => { state.game = g.value.trim(); render(); };
-  void active;
+  // Changing the game steps back out to the list, because a drill-down is into
+  // one game's issue or one game's session and neither survives the change.
+  g.onchange = () => navigate(href({
+    view: state.signature ? "signatures" : state.view,
+    game: g.value.trim(), signature: "", report: null, session: "", mode: "",
+  }));
 }
-
-// 'session' and 'mode' are the two drill-down steps. Empty means "not drilled
-// in yet", so the same view renders all three levels and the back links just
-// clear one of them.
-const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
 
 // Seconds as something a person reads. Runs are minutes, not hours.
 function mmss(sec) {
@@ -197,16 +338,20 @@ async function viewSignatures() {
   const { signatures } = await api("/v1/signatures" + q);
   if (!signatures.length) return '<div class="empty">Nothing reported yet.</div>';
   return '<table><thead><tr><th>Count</th><th>Players</th><th>What</th><th>Where</th><th>Versions</th><th>Last seen</th></tr></thead><tbody>' +
-    signatures.map((s) =>
-      '<tr data-sig="' + esc(s.signature) + '">' +
-      '<td class="count">' + s.count + '</td>' +
-      '<td>' + (s.players || "-") + '<span class="dim"> / ' + s.sessions + ' sess</span></td>' +
-      '<td><span class="kind-' + esc(s.kind) + '">' + esc(s.kind) + '</span> ' +
-      '<span class="title">' + esc(s.title) + '</span><br><span class="dim">' + esc(s.game) + " " + esc(s.signature) + '</span></td>' +
-      '<td class="where">' + esc(where(s)) + '</td>' +
-      '<td class="dim">' + esc(s.versions || "-") + '</td>' +
-      '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
-      '</tr>').join("") + '</tbody></table>';
+    signatures.map((s) => {
+      // The row and the link point at the same place. The row is what gets
+      // clicked; the link is what gets copied, and what a middle-click opens.
+      const at = esc(to({ view: "reports", signature: s.signature }));
+      return '<tr data-href="' + at + '">' +
+        '<td class="count">' + s.count + '</td>' +
+        '<td>' + (s.players || "-") + '<span class="dim"> / ' + s.sessions + ' sess</span></td>' +
+        '<td><a href="' + at + '"><span class="kind-' + esc(s.kind) + '">' + esc(s.kind) + '</span> ' +
+        '<span class="title">' + esc(s.title) + '</span><br><span class="dim">' + esc(s.game) + " " + esc(s.signature) + '</span></a></td>' +
+        '<td class="where">' + esc(where(s)) + '</td>' +
+        '<td class="dim">' + esc(s.versions || "-") + '</td>' +
+        '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
+        '</tr>';
+    }).join("") + '</tbody></table>';
 }
 
 async function viewReports() {
@@ -216,12 +361,14 @@ async function viewReports() {
   const { reports } = await api("/v1/reports?" + q.toString());
   if (!reports.length) return '<div class="empty">No reports match.</div>';
   const back = state.signature
-    ? '<p><button id="back">Back to issues</button> <span class="dim">signature ' + esc(state.signature) + '</span></p>' : "";
+    ? '<p class="crumb"><a class="btn" href="' + esc(to({ view: "signatures" })) + '">Back to issues</a>' +
+      '<span class="dim">signature ' + esc(state.signature) + '</span></p>' : "";
   return back + '<table><thead><tr><th>When</th><th>What</th><th>Version</th><th>Platform</th><th>Player</th></tr></thead><tbody>' +
     reports.map((r) =>
-      '<tr data-id="' + esc(r.id) + '">' +
+      '<tr data-href="' + esc(to({ report: r.id })) + '">' +
       '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
-      '<td><span class="kind-' + esc(r.kind) + '">' + esc(r.kind) + '</span> ' + esc(r.title) + '</td>' +
+      '<td><a href="' + esc(to({ report: r.id })) + '">' +
+        '<span class="kind-' + esc(r.kind) + '">' + esc(r.kind) + '</span> ' + esc(r.title) + '</a></td>' +
       '<td class="dim">' + esc(r.version || "-") + '</td>' +
       '<td class="dim">' + esc(r.platform || "-") + '</td>' +
       '<td class="dim">' + esc(r.player || "-") + '</td>' +
@@ -305,10 +452,10 @@ async function viewSessionList() {
     '<th>Runs</th><th>Faults</th><th>Ended</th>' +
     '</tr></thead><tbody>' +
     sessions.map((s) =>
-      '<tr data-session="' + esc(s.session) + '">' +
+      '<tr data-href="' + esc(to({ view: "runs", session: s.session })) + '">' +
       '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
-      '<td>' + esc(s.session) +
-        (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</td>' +
+      '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) +
+        (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</a></td>' +
       '<td class="num">' + esc(dur(s.seconds)) + '</td>' +
       '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
@@ -328,9 +475,12 @@ async function viewOneSession() {
   if (state.mode) q.set("mode", state.mode);
   const { runs } = await api("/v1/runs?" + q.toString());
 
-  const crumb = '<p><button id="back">All sessions</button> ' +
+  const crumb = '<p class="crumb"><a class="btn" href="' + esc(to({ view: "runs" })) + '">All sessions</a>' +
     '<span class="dim">session ' + esc(state.session) + '</span>' +
-    (state.mode ? ' <span class="dim">/</span> <button id="allmodes">' + esc(state.mode) + ' &times;</button>' : "") +
+    (state.mode
+      ? '<span class="dim">/</span><a class="btn" href="' +
+        esc(to({ view: "runs", session: state.session })) + '">' + esc(state.mode) + ' &times;</a>'
+      : "") +
     '</p>';
 
   if (!runs.length) {
@@ -344,7 +494,8 @@ async function viewOneSession() {
   const modes = [...new Set(runs.map((r) => r.mode).filter(Boolean))];
   const modeBar = (!state.mode && modes.length > 1)
     ? '<p class="dim">Mode: ' + modes.map((m) =>
-        '<button class="mode" data-mode="' + esc(m) + '">' + esc(m) + '</button>').join(" ") + '</p>'
+        '<a class="btn mode" href="' +
+        esc(to({ view: "runs", session: state.session, mode: m })) + '">' + esc(m) + '</a>').join(" ") + '</p>'
     : "";
 
   const table = '<table><thead><tr>' +
@@ -352,8 +503,9 @@ async function viewOneSession() {
     '<th>Wave</th><th>Time</th><th>Kills</th><th>Credits</th><th>Mech</th>' +
     '</tr></thead><tbody>' +
     runs.map((r) =>
-      '<tr data-id="' + esc(r.id) + '">' +
-      '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
+      '<tr data-href="' + esc(to({ report: r.id })) + '">' +
+      '<td class="dim" title="' + esc(when(r.received_at)) + '">' +
+        '<a href="' + esc(to({ report: r.id })) + '">' + esc(ago(r.received_at)) + '</a></td>' +
       '<td class="dim">' + esc(r.mode || "-") + '</td>' +
       '<td>' + esc(r.sector || "-") + '</td>' +
       '<td class="num">' + esc(r.depth == null ? "-" : r.depth) + '</td>' +
@@ -507,7 +659,18 @@ async function viewReport(id) {
     ctx = JSON.stringify(parsed, null, 2);
   } catch (e) { void e; }
   const blocks = ctxBlocks(parsed);
-  return '<p><button id="back">Back</button></p>' +
+  // The way back is read out of the REPORT rather than out of where the click
+  // came from, so a link somebody was sent arrives with the same two ways out
+  // as one that was clicked into: the issue this is one of, and the session it
+  // happened in. Both are the neighbouring questions once a crash is open.
+  const crumb = '<p class="crumb">' +
+    '<a class="btn" href="' + esc(to({ view: "reports" })) + '">All reports</a>' +
+    (r.signature
+      ? '<a class="btn" href="' + esc(to({ view: "reports", signature: r.signature })) + '">This issue</a>' : "") +
+    (r.session
+      ? '<a class="btn" href="' + esc(to({ view: "runs", session: r.session })) + '">This session</a>' : "") +
+    '</p>';
+  return crumb +
     '<div class="card"><h2>' + esc(r.kind) + '</h2>' +
     '<dl class="kv">' +
     '<dt>What</dt><dd>' + esc(r.title) + '</dd>' +
@@ -516,9 +679,13 @@ async function viewReport(id) {
     '<dt>Platform</dt><dd>' + esc(r.platform || "-") + '</dd>' +
     '<dt>GPU</dt><dd>' + esc(r.gpu || "-") + '</dd>' +
     '<dt>Engine</dt><dd>' + esc(r.engine || "-") + '</dd>' +
-    '<dt>Session</dt><dd>' + esc(r.session || "-") + '</dd>' +
+    '<dt>Session</dt><dd>' + (r.session
+      ? '<a href="' + esc(to({ view: "runs", session: r.session })) + '">' + esc(r.session) + '</a>'
+      : "-") + '</dd>' +
     '<dt>Player</dt><dd>' + esc(r.player || "-") + ' <span class="dim">(hashed, not reversible)</span></dd>' +
-    '<dt>Signature</dt><dd>' + esc(r.signature) + '</dd>' +
+    '<dt>Signature</dt><dd>' + (r.signature
+      ? '<a href="' + esc(to({ view: "reports", signature: r.signature })) + '">' + esc(r.signature) + '</a>'
+      : "-") + '</dd>' +
     '</dl></div>' +
     (r.message ? '<div class="card"><h2>Message</h2><pre>' + esc(r.message) + '</pre></div>' : "") +
     (r.stack ? '<div class="card"><h2>Stack</h2><pre>' + esc(r.stack) + '</pre></div>' : "") +
@@ -532,7 +699,8 @@ async function render() {
   // and it says so with a 401; asking the visitor for a key the service is not
   // going to check is how an open portal ends up looking shut.
   const tried = key;
-  toolbar(state.view);
+  document.title = pageTitle();
+  toolbar();
   app.innerHTML = '<div class="empty">Loading...</div>';
   try {
     if (state.report) app.innerHTML = await viewReport(state.report);
@@ -544,31 +712,21 @@ async function render() {
     app.innerHTML = '<div class="card err">' + esc(err.message) + '</div>';
     return;
   }
-  // Back unwinds ONE level at a time, innermost first, so the button always
-  // does the thing the breadcrumb above it says it does.
-  const back = document.getElementById("back");
-  if (back) back.onclick = () => {
-    if (state.report) state.report = null;
-    else if (state.session) { state.session = ""; state.mode = ""; }
-    else { state.signature = ""; state.view = "signatures"; }
-    render();
-  };
-  const allmodes = document.getElementById("allmodes");
-  if (allmodes) allmodes.onclick = () => { state.mode = ""; render(); };
-  app.querySelectorAll("button.mode").forEach((b) => {
-    b.onclick = () => { state.mode = b.dataset.mode; render(); };
-  });
-  app.querySelectorAll("tr[data-sig]").forEach((tr) => {
-    tr.onclick = () => { state.signature = tr.dataset.sig; state.view = "reports"; render(); };
-  });
-  app.querySelectorAll("tr[data-session]").forEach((tr) => {
-    tr.onclick = () => { state.session = tr.dataset.session; state.mode = ""; render(); };
-  });
-  app.querySelectorAll("tr[data-id]").forEach((tr) => {
-    tr.onclick = () => { state.report = tr.dataset.id; render(); };
+  // A whole row is a bigger target than the link inside it, so the row still
+  // takes the click - except when the click was ON that link, which the
+  // document handler has already dealt with and which would otherwise be two
+  // navigations to the same place.
+  app.querySelectorAll("tr[data-href]").forEach((tr) => {
+    tr.onclick = (e) => {
+      if (e.target.closest && e.target.closest("a")) return;
+      navigate(tr.dataset.href);
+    };
   });
 }
 
+// The address is the input, not the output: whatever it says on arrival is
+// what gets drawn, which is what makes a pasted link work.
+readUrl();
 render();
 `;
 
