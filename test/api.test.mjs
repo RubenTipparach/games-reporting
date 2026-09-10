@@ -229,7 +229,17 @@ test("a log that fits is stored whole", async () => {
 test("a flood from one address is throttled, with a Retry-After to back off by", async () => {
   // Drained on purpose rather than by hammering the socket, so this asserts
   // the limiter's behaviour instead of asserting how fast the test host is.
-  while (limiter.allow("127.0.0.1")) { /* spend the bucket */ }
+  //
+  // Spent at an instant AHEAD of now, which is what keeps that true. The
+  // bucket refills continuously, and at 500 a minute a token is back every
+  // 120ms - so draining at this instant and then making a real HTTP request
+  // raced the refill. A round trip slower than 120ms, which a loaded CI runner
+  // will produce sooner or later, arrived at a bucket that had recovered and
+  // was let through: a green limiter and a red test. Draining a minute into
+  // the future leaves the bucket owing tokens rather than holding one, so the
+  // request is refused however long it took to arrive.
+  const ahead = Date.now() + 60_000;
+  while (limiter.allow("127.0.0.1", ahead)) { /* spend the bucket */ }
   const limited = await post(crash);
   assert.equal(limited.status, 429);
   assert.ok(Number(limited.headers.get("retry-after")) >= 1);
