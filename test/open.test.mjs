@@ -230,6 +230,118 @@ test("the page's own script parses", () => {
   assert.doesNotThrow(() => new Function(m[1]), "the browser script must parse");
 });
 
+// ---------------------------------------------------------------------------
+// Addresses. A view you cannot link to is one you can only describe out loud,
+// so every view the portal draws has an address, and the two halves of that
+// are tested here: the server serves the page at each shape, and the page
+// turns each shape back into the view it names.
+
+test("every view of the portal has an address, and every one of them serves it", async () => {
+  const paths = [
+    "/", "/admin",
+    "/issues", "/issues/3f9adeadbeef",
+    "/reports", `/reports/${id}`,
+    "/sessions", "/sessions/open-1", "/sessions/open-1/campaign",
+    // A session id is whatever the game called it, so it can carry anything
+    // once it has been escaped. That must not stop being an address.
+    "/sessions/a%2Fb",
+    "/issues?game=mining-mike",
+  ];
+  for (const path of paths) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200, `${path} should serve the portal`);
+    assert.match(res.headers.get("content-type"), /text\/html/, path);
+  }
+});
+
+test("an address that is not one of them is still a JSON 404", async () => {
+  for (const path of ["/nonsense", "/issues/a/b", "/reports/one/two", "/sessions/a/b/c/d"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 404, `${path} is not a view`);
+    // The page routes sit ALONGSIDE the API, not over it. A mistyped API call
+    // answered with a page is a much worse afternoon than the other way round.
+    assert.match(res.headers.get("content-type"), /application\/json/, path);
+  }
+  const api = await fetch(`${base}/v1/reports`);
+  assert.match(api.headers.get("content-type"), /application\/json/, "/v1 still answers in JSON");
+});
+
+// The page half of it. The script is compiled with the browser objects it
+// expects handed in, then asked for its routing functions: what is on screen
+// turned into an address, and an address turned back into what to draw. A
+// shared link is those two agreeing, so they are worth running rather than
+// reading.
+function router(pathname, search = "") {
+  const src = adminPage().match(/<script>([\s\S]*?)<\/script>/)[1];
+  const el = () => ({
+    innerHTML: "", style: {}, setAttribute() {}, select() {}, remove() {},
+    querySelectorAll: () => [],
+  });
+  const doc = { title: "", getElementById: el, createElement: el, body: { appendChild() {} }, addEventListener() {} };
+  const loc = { pathname, search, href: "http://test" + pathname + search };
+  // The script is written as a page, so it draws itself on load. A fetch that
+  // never settles is what keeps that first draw from reaching any of these
+  // stubs - by the time it is waiting, the routing has already happened.
+  const load = new Function(
+    "document", "location", "history", "sessionStorage", "navigator", "fetch",
+    "addEventListener", "setTimeout",
+    src + "\n;return { state, href, to, readUrl };",
+  );
+  return load(
+    doc, loc, { pushState() {} },
+    { getItem: () => "", setItem() {}, removeItem() {} },
+    {}, () => new Promise(() => {}), () => {}, () => {},
+  );
+}
+
+test("an address opens the view it names", () => {
+  const cases = [
+    ["/", { view: "signatures", signature: "", session: "", report: null }],
+    ["/admin", { view: "signatures" }],
+    ["/issues", { view: "signatures", signature: "" }],
+    ["/issues/3f9a", { view: "reports", signature: "3f9a" }],
+    ["/reports", { view: "reports", report: null }],
+    ["/reports/abc-123", { view: "reports", report: "abc-123" }],
+    ["/sessions", { view: "runs", session: "", mode: "" }],
+    ["/sessions/sess-a", { view: "runs", session: "sess-a", mode: "" }],
+    ["/sessions/sess-a/campaign", { view: "runs", session: "sess-a", mode: "campaign" }],
+    // A mode with no session to hang it on is not a view.
+    ["/sessions//campaign", { view: "runs", session: "campaign", mode: "" }],
+  ];
+  for (const [path, want] of cases) {
+    const { state } = router(path);
+    for (const [k, v] of Object.entries(want)) {
+      assert.equal(state[k], v, `${path} should set ${k} to ${JSON.stringify(v)}`);
+    }
+  }
+});
+
+test("and the view hands back the address it was opened on", () => {
+  const paths = [
+    "/issues", "/issues/3f9a", "/reports", "/reports/abc-123",
+    "/sessions", "/sessions/sess-a", "/sessions/sess-a/campaign",
+  ];
+  for (const path of paths) {
+    const { state, href } = router(path);
+    assert.equal(href(state), path, "a view's address must survive the round trip");
+  }
+});
+
+test("the game filter rides along, so a shared link is filtered as the screen was", () => {
+  const { state, href, to } = router("/sessions", "?game=mining-mike");
+  assert.equal(state.game, "mining-mike");
+  assert.equal(href(state), "/sessions?game=mining-mike");
+  assert.equal(to({ view: "reports", signature: "3f9a" }), "/issues/3f9a?game=mining-mike");
+});
+
+test("a session id that needs escaping still makes an address", () => {
+  const { to } = router("/sessions");
+  assert.equal(to({ view: "runs", session: "a/b" }), "/sessions/a%2Fb");
+  assert.equal(router("/sessions/a%2Fb").state.session, "a/b", "and comes back whole");
+  // Nonsense in the path is a view, not a crash: the default one.
+  assert.equal(router("/sessions/%E0%A4%A").state.view, "signatures");
+});
+
 test("a session is one row, with its length and how it ended", async () => {
   const post = (body) => fetch(`${base}/v1/reports`, {
     method: "POST",

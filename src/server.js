@@ -200,6 +200,28 @@ function requireKey(req, res) {
   return false;
 }
 
+// The addresses the portal answers on, and the shapes of the things a link can
+// point at:
+//
+//   /issues            /issues/<signature>
+//   /reports           /reports/<id>
+//   /sessions          /sessions/<session>      /sessions/<session>/<mode>
+//
+// Deliberately not a catch-all. An unknown path stays a JSON 404, because a
+// mistyped API call answering with a page is a far worse afternoon than a
+// mistyped page URL answering with JSON.
+const PAGE_ROUTES = [
+  /^\/$/,
+  /^\/admin$/,
+  /^\/issues(?:\/[^/]+)?$/,
+  /^\/reports(?:\/[^/]+)?$/,
+  /^\/sessions(?:\/[^/]+){0,2}$/,
+];
+
+function isPagePath(path) {
+  return PAGE_ROUTES.some((re) => re.test(path));
+}
+
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -209,7 +231,13 @@ function handleRequest(req, res, url) {
 
   // The portal is a static page that holds no data; everything it draws comes
   // from the read routes below, and those are open, so it just loads.
-  if (req.method === "GET" && (path === "/" || path === "/admin")) {
+  //
+  // Every view it can draw is served here, at its own address, so a link to one
+  // issue or one session can be pasted to somebody else and open on the thing
+  // it was copied from. They all answer with the SAME page - the routing is in
+  // the page, which reads the path and draws that view - so PAGE_ROUTES is a
+  // list of shapes rather than a list of handlers.
+  if (req.method === "GET" && isPagePath(path)) {
     const html = adminPage();
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
