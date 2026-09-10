@@ -325,6 +325,10 @@ function handleRequest(req, res, url) {
       sessions: store.sessions({
         game: q.get("game") || undefined,
         limit: pageLimit(q.get("limit"), PAGE.sessions),
+        // The window a session has to check in inside to still count as
+        // running. Both halves come from config so they can be moved with the
+        // game's own heartbeat rather than by editing a query.
+        staleAfter: config.heartbeatSeconds * config.heartbeatStaleFactor * 1000,
       }),
     });
   }

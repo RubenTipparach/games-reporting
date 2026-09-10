@@ -301,8 +301,15 @@ export function openDatabase(dataDir) {
     // A session ENDED IN A CRASH if any report for it was raised from the
     // session marker - that report is posted by the NEXT launch and carries
     // the dead session's id, which is exactly what makes this knowable.
-    sessions({ game, limit = 100 } = {}) {
-      const args = { limit: Math.min(Math.max(1, limit), PAGE.sessions.max) };
+    // `now` and `staleAfter` are passed in rather than read from a clock in
+    // here, so the same rows can be asked about at a chosen instant - which is
+    // what makes liveness testable without waiting five minutes for it.
+    sessions({ game, limit = 100, now = Date.now(), staleAfter = 600_000 } = {}) {
+      const args = {
+        limit: Math.min(Math.max(1, limit), PAGE.sessions.max),
+        now,
+        staleAfter,
+      };
       let filter = "WHERE session <> ''";
       if (game) {
         filter += " AND game = @game";
@@ -332,8 +339,33 @@ export function openDatabase(dataDir) {
                  SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
                  SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
                  SUM(CASE WHEN kind IN ('crash','error') THEN 1 ELSE 0 END) AS faults,
-                 MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
-                          THEN 1 ELSE 0 END) AS ended_in_crash
+                 -- STILL RUNNING, or over. A session cannot report its own end
+                 -- - a clean quit is the process leaving and a crash is the
+                 -- process gone - so the only evidence either way is the
+                 -- check-in, and the only reading of it is the absence. Inside
+                 -- the window the game is still there; past it, it is not.
+                 CASE WHEN @now - MAX(received_at) < @staleAfter
+                      THEN 1 ELSE 0 END AS live,
+                 -- When the last thing we heard was heard, so a caller can say
+                 -- "4m ago" about a live session without a second query.
+                 @now - MAX(received_at) AS silent_for,
+                 -- Ended in a crash only if the crash was the LAST WORD.
+                 --
+                 -- This used to be "a marker crash exists anywhere in this
+                 -- session", and that is not the same claim. A marker crash is
+                 -- posted by a LATER launch that found a marker file lying
+                 -- about, and a second copy of the game started while the
+                 -- first is still open finds exactly that - so a session that
+                 -- ran for ten more hours after the marker was read was being
+                 -- reported as having died at the start of it. The check-ins
+                 -- that came afterwards are the refutation, and they are right
+                 -- there in the same rows.
+                 CASE WHEN MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
+                                    THEN received_at END) IS NOT NULL
+                       AND COALESCE(MAX(CASE WHEN kind = 'session' THEN received_at END), 0)
+                           < MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
+                                      THEN received_at END)
+                      THEN 1 ELSE 0 END AS ended_in_crash
           FROM reports
           ${filter}
           GROUP BY session

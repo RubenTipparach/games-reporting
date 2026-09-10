@@ -84,6 +84,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .outcome-failed    { color: var(--crash); }
 .outcome-quit      { color: var(--warn); }
 .outcome-crashed   { color: var(--crash); font-weight: 600; }
+/* Still running. Not an outcome, because it has not had one yet. */
+.outcome-live      { color: #6fd08c; font-weight: 600; }
 .crashy            { color: var(--crash); }
 a.btn.mode         { padding: 3px 8px; font-size: 12px; }
 .kind-crash { color: var(--crash); }
@@ -524,7 +526,12 @@ async function viewSessionList() {
   const lengths = sessions.map((s) => Number(s.seconds) || 0).sort((a, b) => a - b);
   const mid = Math.floor(lengths.length / 2);
   const med = lengths.length % 2 ? lengths[mid] : Math.round((lengths[mid - 1] + lengths[mid]) / 2);
-  const crashed = sessions.filter((s) => s.ended_in_crash).length;
+  // A session still checking in has not ended, so it is not evidence either
+  // way about how sessions end. Counting it as "closed normally" is what makes
+  // a crash rate drift down every time somebody leaves the game open.
+  const live = sessions.filter((s) => s.live).length;
+  const done = sessions.filter((s) => !s.live);
+  const crashed = done.filter((s) => s.ended_in_crash).length;
 
   const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
       '<dl class="kv"><dt>played</dt><dd>' + sessions.length + '</dd>' +
@@ -539,10 +546,12 @@ async function viewSessionList() {
         (total ? ' <span class="dim">' + Math.round(((total - totalPlayed) / total) * 100) + '%</span>' : '') +
         '</dd></dl></div>' +
     '<div class="block"><h4>How they ended</h4>' +
-      '<dl class="kv"><dt>closed normally</dt><dd>' + (sessions.length - crashed) + '</dd>' +
+      '<dl class="kv"><dt>closed normally</dt><dd>' + (done.length - crashed) + '</dd>' +
       '<dt class="crashy">ended in a crash</dt><dd class="crashy">' + crashed + '</dd>' +
       '<dt>crash rate</dt><dd>' +
-        (sessions.length ? Math.round((crashed / sessions.length) * 100) : 0) + '%</dd></dl></div>' +
+        (done.length ? Math.round((crashed / done.length) * 100) : 0) + '%</dd>' +
+      (live ? '<dt class="outcome-live">still open</dt><dd class="outcome-live">' + live +
+              '</dd>' : '') + '</dl></div>' +
     '</div>';
 
   const table = '<table><thead><tr>' +
@@ -562,9 +571,15 @@ async function viewSessionList() {
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
       '<td>' + tally(s) + '</td>' +
       '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
-      '<td>' + (s.ended_in_crash
-        ? '<span class="outcome-crashed">crashed</span>'
-        : '<span class="dim">closed</span>') + '</td>' +
+      // Three states, not two. A session that is still checking in has not
+      // ended at all, and drawing it as "closed" or "crashed" is the portal
+      // reporting an outcome that has not happened.
+      '<td>' + (s.live
+        ? '<span class="outcome-live">live</span>' +
+          '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
+        : s.ended_in_crash
+          ? '<span class="outcome-crashed">crashed</span>'
+          : '<span class="dim">closed</span>') + '</td>' +
       '</tr>').join("") + '</tbody></table>';
 
   return head + table;
