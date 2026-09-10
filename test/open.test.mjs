@@ -233,9 +233,15 @@ test("the page's own script parses", () => {
 // ---------------------------------------------------------------------------
 // Paging the two top-level lists.
 //
-// The cursor is (sort key, tiebreak) rather than the sort key alone, and these
-// exist because the sort key alone lost rows. Nothing here waits or sleeps: the
-// ties are made by posting a burst, which is how they occur in the wild.
+// The cursor is (sort key, tiebreak) rather than the sort key alone, because
+// the sort key alone lost rows.
+//
+// The arrangement that loses them is built BY HAND below rather than by
+// posting a burst and hoping. A burst does produce ties, but at timestamps
+// nobody chose, and whether a page boundary happens to fall inside one is
+// luck: the first version of this asserted the lossy cursor was lossy, and CI
+// ran it green on a boundary that missed every tie. A test that only fails
+// sometimes is not a test.
 
 // Everything in one game of its own, so the reports the rest of this file
 // posted cannot pad or skew the counts.
@@ -251,12 +257,12 @@ async function postBurst(n, shape) {
 }
 
 // Walks a list with the cursor the service hands back, and reports what it saw.
-async function walk(path, key, pageSize, extra = {}) {
+async function walk(path, key, pageSize) {
   const seen = [];
   let cursor;
   let pages = 0;
   for (;;) {
-    const q = new URLSearchParams({ game: PAGED, limit: String(pageSize), ...extra });
+    const q = new URLSearchParams({ game: PAGED, limit: String(pageSize) });
     if (cursor) {
       q.set("before", String(cursor.before));
       q.set("before_id", String(cursor.before_id));
@@ -272,43 +278,74 @@ async function walk(path, key, pageSize, extra = {}) {
   return { seen, pages };
 }
 
-test("a burst of reports shares timestamps, which is what the cursor has to survive", async () => {
+// The exact arrangement, straight into the table: three reports sharing one
+// millisecond, with a page edge falling inside them. This is what a log scrape
+// uploading a backlog produces, and what the timestamp-only cursor steps over.
+const TIED = "tie-fixture";
+const T0 = 1_700_000_000_000;
+
+test("the cursor is a pair, because received_at is not unique", () => {
+  const at = (ms, id) => store.insert({
+    id, received_at: ms, game: TIED, version: "", kind: "error",
+    signature: "sig", title: "t", message: "m", stack: "", log: "",
+    platform: "", gpu: "", engine: "", session: "", player: "", context: "{}",
+  });
+  at(T0 + 2, "tie-a");
+  at(T0 + 1, "tie-b1");
+  at(T0 + 1, "tie-b2");
+  at(T0 + 1, "tie-b3");
+  at(T0, "tie-c");
+
+  // Newest first, ties broken by id descending, which is a total order.
+  const order = store.list({ game: TIED, limit: 10 }).map((r) => r.id);
+  assert.deepEqual(order, ["tie-a", "tie-b3", "tie-b2", "tie-b1", "tie-c"]);
+
+  // Two at a time, so the second page starts in the middle of the tie.
+  const pair = [];
+  let cur;
+  for (let page = 0; page < 10; page++) {
+    const rows = store.list({ game: TIED, limit: 2, before: cur?.before, beforeId: cur?.beforeId });
+    if (!rows.length) break;
+    pair.push(...rows.map((r) => r.id));
+    const last = rows[rows.length - 1];
+    cur = { before: last.received_at, beforeId: last.id };
+  }
+  assert.deepEqual(pair, order, "the pair walks every row, in order, exactly once");
+
+  // The same walk with the timestamp alone, which is what shipped first.
+  const lone = [];
+  let before;
+  for (let page = 0; page < 10; page++) {
+    const rows = store.list({ game: TIED, limit: 2, before });
+    if (!rows.length) break;
+    lone.push(...rows.map((r) => r.id));
+    const last = rows[rows.length - 1].received_at;
+    if (last === before) break;
+    before = last;
+  }
+  assert.deepEqual(lone, ["tie-a", "tie-b3", "tie-c"],
+    "asking for strictly older skips the rest of the millisecond it stopped on");
+  assert.equal(lone.length, 3, "three of the five, and no error to say so");
+});
+
+test("a burst of reports pages completely, however its timestamps fall", async () => {
   await postBurst(60, (i) => ({ kind: "error", message: "burst " + i }));
   const all = await fetch(`${base}/v1/reports?game=${PAGED}&limit=200`).then((r) => r.json());
   assert.equal(all.reports.length, 60);
 
-  const perMs = new Map();
-  for (const r of all.reports) perMs.set(r.received_at, (perMs.get(r.received_at) || 0) + 1);
-  assert.ok(perMs.size < 60,
-    "sixty reports posted at once should land on fewer than sixty milliseconds; " +
-    "if they ever do not, this test has stopped covering the thing it was written for");
-});
-
-test("paging reports keeps every row exactly once, ties and all", async () => {
   const { seen, pages } = await walk("/v1/reports", "reports", 7);
   assert.ok(pages > 1, "seven at a time should take several pages");
   assert.equal(seen.length, 60, "every report comes back");
   assert.equal(new Set(seen.map((r) => r.id)).size, 60, "and none of them twice");
 });
 
-test("the cursor by timestamp alone is still accepted, and still loses rows", async () => {
-  // The shape the first version of this documented. Kept working so a script
-  // written against it does not break, and asserted to be lossy so nobody
-  // mistakes it for the one to use.
-  const seen = new Set();
-  let before;
-  for (let page = 0; page < 50; page++) {
-    const q = new URLSearchParams({ game: PAGED, limit: "7" });
-    if (before !== undefined) q.set("before", String(before));
-    const { reports } = await fetch(`${base}/v1/reports?${q}`).then((r) => r.json());
-    if (!reports.length) break;
-    for (const r of reports) seen.add(r.id);
-    const last = reports[reports.length - 1].received_at;
-    if (last === before) break;
-    before = last;
-  }
-  assert.ok(seen.size < 60,
-    "paging by timestamp alone skips whatever shared the last row's millisecond");
+test("the timestamp-only cursor is still accepted, so anything using it still reads", async () => {
+  const first = await fetch(`${base}/v1/reports?game=${PAGED}&limit=5`).then((r) => r.json());
+  const edge = first.reports[first.reports.length - 1].received_at;
+  const res = await fetch(`${base}/v1/reports?game=${PAGED}&limit=5&before=${edge}`);
+  assert.equal(res.status, 200, "the shape that shipped first is not an error");
+  const { reports } = await res.json();
+  assert.ok(reports.every((r) => r.received_at < edge), "and it means what it always meant");
 });
 
 test("the last page carries no cursor, so a Load more link stops existing", async () => {
@@ -322,7 +359,7 @@ test("the last page carries no cursor, so a Load more link stops existing", asyn
   assert.equal(typeof full.next.before_id, "string");
 });
 
-test("the issue rollup pages too, and its ties are the same problem", async () => {
+test("the issue rollup pages too, on last_seen and the signature", async () => {
   // Distinct faults, so these are distinct signatures rather than one group.
   await postBurst(40, (i) => ({
     kind: "crash",
@@ -332,10 +369,6 @@ test("the issue rollup pages too, and its ties are the same problem", async () =
   const all = await fetch(`${base}/v1/signatures?game=${PAGED}&limit=200`).then((r) => r.json());
   const total = all.signatures.length;
   assert.ok(total >= 40, "each distinct fault is its own issue");
-
-  const perMs = new Map();
-  for (const s of all.signatures) perMs.set(s.last_seen, (perMs.get(s.last_seen) || 0) + 1);
-  assert.ok(perMs.size < total, "and they share last_seen values, being one burst");
 
   const { seen, pages } = await walk("/v1/signatures", "signatures", 6);
   assert.ok(pages > 1);
