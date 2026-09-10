@@ -456,7 +456,10 @@ async function viewSessionList() {
       '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
       '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) +
         (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</a></td>' +
-      '<td class="num">' + esc(dur(s.seconds)) + '</td>' +
+      // A dash for absent, a duration for measured, the same way "in game"
+      // already reads. A session whose reports never carried a length is not a
+      // session that lasted no time, and "0s" says the second thing.
+      '<td class="num' + (s.seconds ? '' : ' dim') + '">' + esc(s.seconds ? dur(s.seconds) : "-") + '</td>' +
       '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
       '<td>' + tally(s) + '</td>' +
