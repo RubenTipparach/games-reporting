@@ -62,10 +62,17 @@ tbody tr:hover { background: #1b2029; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .where { color: #6fd08c; white-space: nowrap; }
 .bars { display: grid; gap: 9px; }
-.bar-row { display: grid; grid-template-columns: 84px 1fr 96px 210px; gap: 12px; align-items: center; }
+.bar-row { display: grid; grid-template-columns: 170px 1fr 118px auto; gap: 12px; align-items: center; }
+/* A sector is named, not numbered, and the names are as long as they are.
+   Clipping one is better than reflowing the whole row around it; the full
+   name is on the row's title. */
+.bar-where { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar-track { background: #10151c; border: 1px solid var(--line); border-radius: 2px; height: 17px; position: relative; overflow: hidden; }
 .bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .55; }
-.bar-val { text-align: right; font-variant-numeric: tabular-nums; }
+/* Both of these are short, fixed phrases; wrapping one costs a row of height
+   and buys nothing. */
+.bar-val { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bar-row > span:last-child { white-space: nowrap; }
 .blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
 .block { background: var(--panel); padding: 14px 16px; display: grid; gap: 8px; align-content: start; }
 .block h4 { margin: 0; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
@@ -456,7 +463,10 @@ async function viewSessionList() {
       '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
       '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) +
         (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</a></td>' +
-      '<td class="num">' + esc(dur(s.seconds)) + '</td>' +
+      // A dash for absent, a duration for measured, the same way "in game"
+      // already reads. A session whose reports never carried a length is not a
+      // session that lasted no time, and "0s" says the second thing.
+      '<td class="num' + (s.seconds ? '' : ' dim') + '">' + esc(s.seconds ? dur(s.seconds) : "-") + '</td>' +
       '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
       '<td>' + tally(s) + '</td>' +
@@ -526,48 +536,97 @@ async function viewOneSession() {
   // whatever it did - one run that died on wave 0 rendered as a full bar,
   // which is the opposite of the truth. Against ten, a wave 0 run is an empty
   // track, which is what happened.
-  const byDepth = new Map();
-  for (const r of runs) {
-    const d = r.depth == null ? "?" : r.depth;
-    if (!byDepth.has(d)) byDepth.set(d, []);
-    byDepth.get(d).push(r);
-  }
+  //
+  // A row is one PLACE: a sector AND a depth, not a depth on its own. Depth 1
+  // of Meridian and depth 1 of The Long Haul are different rooms that happen
+  // to share a number, and folding them into one row is how a sector nobody
+  // can clear hides behind one everybody can. The number alone also cannot be
+  // acted on - "depth 1 is brutal" is not a thing anybody can go and look at.
   const median = (xs) => {
     const v = [...xs].sort((a, b) => a - b);
     if (!v.length) return 0;
     const m = Math.floor(v.length / 2);
     return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
   };
-  // Ten waves to a campaign depth. Survival has no contract length, so its
-  // bars scale to the furthest anybody actually reached instead.
+  // Ten waves to a campaign depth. An endless mode has no contract length, so
+  // its bars scale to the furthest reached instead - see below.
   const WAVES_PER_DEPTH = 10;
-  const reached = [...byDepth.entries()]
-    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-    .map(([d, rs]) => [
-      d,
-      median(rs.map((r) => Number(r.wave) || 0)),
-      median(rs.map((r) => Number(r.seconds) || 0)),
-      rs.length,
-      rs.filter((r) => r.outcome === "succeeded").length,
-    ]);
-  const survival = runs.length > 0 && runs.every((r) => r.mode === "survival");
-  const scale = survival
-    ? Math.max(1, ...reached.map((r) => r[1]))
-    : WAVES_PER_DEPTH;
+
+  const groups = new Map();
+  for (const r of runs) {
+    // No depth means a mode that HAS no depth, which is a different statement
+    // from a depth that went missing. Survival gets its own row rather than
+    // being filed under "Depth ?", where it was also being measured against
+    // ten waves it was never playing for: two runs that reached waves 30 and
+    // 22 rendered as a full bar reading "wave 26 / 10".
+    const endless = r.depth == null;
+    const sector = r.sector || "";
+    const mode = r.mode || "";
+    // A key that cannot be forged by a sector name, whatever is in it.
+    const key = JSON.stringify(endless ? ["endless", mode] : ["depth", sector, r.depth]);
+    if (!groups.has(key)) groups.set(key, { endless, sector, mode, depth: r.depth, runs: [] });
+    groups.get(key).runs.push(r);
+  }
+
+  const rows = [...groups.values()]
+    .map((g) => ({
+      endless: g.endless,
+      sector: g.sector,
+      mode: g.mode,
+      depth: g.depth,
+      wave: median(g.runs.map((r) => Number(r.wave) || 0)),
+      best: Math.max(0, ...g.runs.map((r) => Number(r.wave) || 0)),
+      secs: median(g.runs.map((r) => Number(r.seconds) || 0)),
+      n: g.runs.length,
+      won: g.runs.filter((r) => r.outcome === "succeeded").length,
+    }))
+    // The sectors in order, each with its depths climbing numerically - 2
+    // before 10, which sorting the labels as text got backwards. Endless last,
+    // since it is not on the same ladder.
+    .sort((a, b) =>
+      (a.endless ? 1 : 0) - (b.endless ? 1 : 0) ||
+      a.sector.localeCompare(b.sector) ||
+      (a.depth || 0) - (b.depth || 0) ||
+      a.mode.localeCompare(b.mode));
+
+  // A mode with no end has no whole to be a share of, so its denominator is
+  // the furthest any single run in this session actually reached. It has to be
+  // the best RUN and not the best row's median, or a lone endless row is
+  // measured against itself and fills the track no matter what it did - the
+  // very thing the absolute scale above exists to prevent. Where the bar's
+  // right edge is gets printed beside it, since a scale nobody can see is not
+  // one anybody can read.
+  const endlessBest = Math.max(1, ...rows.filter((g) => g.endless).map((g) => g.best));
+
+  const title = (g) => {
+    if (g.endless) return g.mode ? g.mode.charAt(0).toUpperCase() + g.mode.slice(1) : "Endless";
+    if (g.sector) return g.sector + " d" + g.depth;
+    return "Depth " + g.depth;
+  };
+  const label = (g) => {
+    if (g.endless || !g.sector) return esc(title(g));
+    // The sector is the name worth reading; the depth rides along beside it.
+    return esc(g.sector) + ' <span class="dim">d' + esc(g.depth) + '</span>';
+  };
 
   const bars = '<div class="card"><h2>How far they got</h2><div class="bars">' +
-    reached.map(([d, wave, secs, n, won]) =>
-      '<div class="bar-row"><span>Depth ' + esc(d) + '</span>' +
+    rows.map((g) => {
+      const scale = g.endless ? endlessBest : WAVES_PER_DEPTH;
+      return '<div class="bar-row">' +
+      '<span class="bar-where" title="' + esc(title(g)) + '">' + label(g) + '</span>' +
       '<span class="bar-track">' +
         // The cleared share is drawn solid over the reached bar, so a depth
         // people finish looks different from one they merely survive into.
         '<span class="bar-fill" style="width:' +
-          Math.round((Math.min(wave, scale) / scale) * 100) + '%"></span>' +
+          Math.round((Math.min(g.wave, scale) / scale) * 100) + '%"></span>' +
         '</span>' +
-      '<span class="bar-val">wave ' + esc(wave) +
-        (survival ? '' : ' <span class="dim">/ ' + WAVES_PER_DEPTH + '</span>') + '</span>' +
-      '<span class="dim">' + esc(mmss(secs)) + ' &middot; ' + n + ' run' + (n === 1 ? "" : "s") +
-        (won ? ', ' + won + ' cleared' : '') + '</span></div>').join("") +
+      '<span class="bar-val">wave ' + esc(g.wave) +
+        ' <span class="dim">/ ' + esc(g.endless ? endlessBest : WAVES_PER_DEPTH) + '</span></span>' +
+      '<span class="dim">' + esc(mmss(g.secs)) + ' &middot; ' + g.n + ' run' + (g.n === 1 ? "" : "s") +
+        (g.won ? ', ' + g.won + ' cleared' : '') +
+        // Only when it says something the median did not.
+        (g.endless && g.best > g.wave ? ', best ' + esc(g.best) : '') + '</span></div>';
+    }).join("") +
     '</div></div>';
 
   return crumb + modeBar + bars + table;

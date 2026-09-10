@@ -22,9 +22,9 @@ on:
   workflow_dispatch:
     inputs:
       smoke_test:
-        description: "Post test reports at the live service afterwards"
+        description: "Also post test reports at the live service (they stay in the database)"
         type: boolean
-        default: true
+        default: false
 
 # NO workflow-level concurrency. A workflow-level group cancelling in progress
 # would kill a Fly deploy mid-release, and one that queues at workflow level
@@ -251,7 +251,7 @@ jobs:
     name: Smoke test the live service
     needs: deploy
     # Nothing was deployed when the gate skipped, so there is nothing to smoke.
-    if: needs.deploy.outputs.ready == 'true' && (github.event_name == 'push' || inputs.smoke_test)
+    if: needs.deploy.outputs.ready == 'true'
     runs-on: ubuntu-latest
     env:
       URL: ${{ vars.SERVICE_URL || 'https://games-reporting.fly.dev' }}
@@ -309,7 +309,27 @@ jobs:
           echo "===== machine logs ====="
           flyctl logs -a games-reporting --no-tail || true
 
+      # OPT-IN, and off by default, because this posts into the real database
+      # and nothing takes it back out. It ran on every push for nine deploys
+      # and left thirty six reports behind in three sessions that had never
+      # been played: no length, no runs, no mode, and a fault count that was
+      # really a count of how many times this workflow had run. A permanent
+      # fixture in the data that describes CI rather than the game is worse
+      # than not having the check, because the sessions list is read to answer
+      # "how are playtests going" and those rows answer nothing.
+      #
+      # What is kept is everything above and below this step, which is the
+      # part that was actually load-bearing: the service answers, it has an
+      # address, and its read routes are open. Those prove the deploy without
+      # writing anything. Posting is still one manual run away when the
+      # ingest path itself is what you want to exercise:
+      #
+      #   gh workflow run Deploy -f smoke_test=true
+      #
+      # and `node scripts/send-test-reports.mjs <url>` locally, where a
+      # throwaway database is the point rather than the problem.
       - name: Send test reports
+        if: github.event_name == 'workflow_dispatch' && inputs.smoke_test
         run: node scripts/send-test-reports.mjs "$URL" "$INGEST_KEY"
         env:
           # Empty until posting is locked down, and the script sends no header
