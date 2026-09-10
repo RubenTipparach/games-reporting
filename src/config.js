@@ -57,6 +57,24 @@ export const config = {
   rateBurst: int("RATE_BURST", 20),
   ratePerMinute: int("RATE_PER_MINUTE", 10),
 
+  // How often the game checks in, and it has to MATCH THE GAME: telemetry.gd
+  // ships `heartbeat_minutes = 5.0`, so a session that is still running says
+  // so every five minutes and one that has stopped says nothing at all. That
+  // is the only signal there is for the difference, because a session cannot
+  // report its own end: a clean quit is the process leaving and a crash is the
+  // process gone.
+  //
+  // So the rule is the absence: no check-in for longer than the window below
+  // and the session is over. Set this and HEARTBEAT_STALE_FACTOR from the same
+  // place the game's interval is set, or the service starts calling live
+  // sessions dead (too short) or dead ones live (too long).
+  heartbeatSeconds: int("HEARTBEAT_SECONDS", 300),
+  // How many missed check-ins are forgiven before a session counts as ended.
+  // Two: one missed post is a dropped request, a flaky network or the service
+  // waking from sleep, and calling a session dead over one of those would make
+  // the state flicker. Two in a row is the game not running.
+  heartbeatStaleFactor: int("HEARTBEAT_STALE_FACTOR", 2),
+
   // Reports older than this are swept. Long enough to still be looking at a
   // release two months after it shipped.
   retentionDays: int("RETENTION_DAYS", 90),

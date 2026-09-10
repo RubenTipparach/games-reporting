@@ -231,6 +231,267 @@ test("the page's own script parses", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Is it still running?
+//
+// A session cannot report its own end: a clean quit is the process leaving and
+// a crash is the process gone. The only evidence is the check-in the game
+// sends every five minutes, and the only reading of it is the absence.
+//
+// The clock is handed in rather than waited on, so these assert the rule and
+// not the patience of whoever is running them.
+
+const HEARTBEAT = 300_000;
+const STALE = 2 * HEARTBEAT;
+const LIVE = "live-fixture";
+
+function checkIn(session, at, extra = {}) {
+  store.insert({
+    id: `${session}-${at}-${Math.random().toString(16).slice(2, 8)}`,
+    received_at: at, game: LIVE, version: "", kind: "session",
+    signature: "sig", title: "open", message: "open", stack: "", log: "",
+    platform: "", gpu: "", engine: "", session, player: "", context: "{}",
+    ...extra,
+  });
+}
+
+const rowFor = (session, now) =>
+  store.sessions({ game: LIVE, now, staleAfter: STALE, limit: 50 })
+    .find((s) => s.session === session);
+
+test("a session that checked in a moment ago is still running", () => {
+  const t = 1_800_000_000_000;
+  checkIn("still-here", t - 3 * HEARTBEAT);
+  checkIn("still-here", t - 2 * HEARTBEAT);
+  checkIn("still-here", t - 60_000);
+  const row = rowFor("still-here", t);
+  assert.equal(row.live, 1, "one minute since the last check-in is not gone");
+  assert.ok(row.silent_for < HEARTBEAT);
+});
+
+test("one missed check-in is forgiven, two is the session ending", () => {
+  const t = 1_800_000_000_000;
+  checkIn("one-missed", t - 6 * HEARTBEAT);
+  checkIn("one-missed", t - HEARTBEAT - 30_000);
+  assert.equal(rowFor("one-missed", t).live, 1,
+    "a single dropped post is a network, not a death");
+
+  checkIn("two-missed", t - 6 * HEARTBEAT);
+  checkIn("two-missed", t - STALE - 30_000);
+  assert.equal(rowFor("two-missed", t).live, 0,
+    "two intervals of silence and the game is not running");
+});
+
+test("the same session is live and then is not, as the clock moves past it", () => {
+  const t = 1_800_000_000_000;
+  checkIn("goes-quiet", t);
+  assert.equal(rowFor("goes-quiet", t + HEARTBEAT).live, 1);
+  assert.equal(rowFor("goes-quiet", t + STALE - 1).live, 1, "the window is inclusive up to it");
+  assert.equal(rowFor("goes-quiet", t + STALE).live, 0, "and closed at it");
+  assert.equal(rowFor("goes-quiet", t + 10 * STALE).silent_for, 10 * STALE);
+});
+
+test("a marker crash is only an ending if nothing checked in after it", () => {
+  const t = 1_800_000_000_000;
+  const marker = (session, at) => store.insert({
+    id: `${session}-marker-${at}`, received_at: at, game: LIVE, version: "",
+    kind: "crash", signature: "sig", title: "Game did not shut down cleanly",
+    message: "Game did not shut down cleanly", stack: "", log: "",
+    platform: "", gpu: "", engine: "", session, player: "",
+    context: JSON.stringify({ detected_by: "session marker" }),
+  });
+
+  // A second copy of the game, started while the first is still open, finds a
+  // marker file that is being refreshed by a LIVE process and reports it as a
+  // crash. The check-ins that follow are the refutation - and this ran for ten
+  // more hours in the real data while the portal called it crashed.
+  checkIn("kept-going", t - 20 * HEARTBEAT);
+  marker("kept-going", t - 19 * HEARTBEAT);
+  checkIn("kept-going", t - HEARTBEAT);
+  const alive = rowFor("kept-going", t);
+  assert.equal(alive.live, 1);
+  assert.equal(alive.ended_in_crash, 0,
+    "a session that kept checking in did not end when the marker was read");
+
+  // The real thing: the marker is the last word.
+  checkIn("really-died", t - 20 * HEARTBEAT);
+  marker("really-died", t - 19 * HEARTBEAT);
+  const dead = rowFor("really-died", t);
+  assert.equal(dead.live, 0);
+  assert.equal(dead.ended_in_crash, 1, "nothing after the marker, so it is the ending");
+});
+
+test("the window comes from config, so it can follow the game's interval", async () => {
+  const res = await fetch(`${base}/v1/sessions?game=${LIVE}&limit=50`);
+  assert.equal(res.status, 200);
+  const { sessions } = await res.json();
+  const row = sessions.find((s) => s.session === "still-here");
+  assert.ok(row, "the route serves the same rows");
+  assert.equal(typeof row.live, "number", "and carries the state it worked out");
+  assert.equal(typeof row.silent_for, "number");
+  // Everything in this fixture was inserted at a fixed instant in 2027, so by
+  // a real clock it is either far future or long silent - never mid-window.
+  assert.ok(row.live === 0 || row.live === 1);
+});
+
+// ---------------------------------------------------------------------------
+// Paging the two top-level lists.
+//
+// The cursor is (sort key, tiebreak) rather than the sort key alone, because
+// the sort key alone lost rows.
+//
+// The arrangement that loses them is built BY HAND below rather than by
+// posting a burst and hoping. A burst does produce ties, but at timestamps
+// nobody chose, and whether a page boundary happens to fall inside one is
+// luck: the first version of this asserted the lossy cursor was lossy, and CI
+// ran it green on a boundary that missed every tie. A test that only fails
+// sometimes is not a test.
+
+// Everything in one game of its own, so the reports the rest of this file
+// posted cannot pad or skew the counts.
+const PAGED = "paging-fixture";
+
+async function postBurst(n, shape) {
+  await Promise.all(Array.from({ length: n }, (_, i) =>
+    fetch(`${base}/v1/reports`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ game: PAGED, ...shape(i) }),
+    })));
+}
+
+// Walks a list with the cursor the service hands back, and reports what it saw.
+async function walk(path, key, pageSize) {
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  for (;;) {
+    const q = new URLSearchParams({ game: PAGED, limit: String(pageSize) });
+    if (cursor) {
+      q.set("before", String(cursor.before));
+      q.set("before_id", String(cursor.before_id));
+    }
+    const body = await fetch(`${base}${path}?${q}`).then((r) => r.json());
+    if (!body[key].length) break;
+    pages += 1;
+    seen.push(...body[key]);
+    if (!body.next) break;
+    cursor = body.next;
+    assert.ok(pages < 50, "the cursor should terminate, not run forever");
+  }
+  return { seen, pages };
+}
+
+// The exact arrangement, straight into the table: three reports sharing one
+// millisecond, with a page edge falling inside them. This is what a log scrape
+// uploading a backlog produces, and what the timestamp-only cursor steps over.
+const TIED = "tie-fixture";
+const T0 = 1_700_000_000_000;
+
+test("the cursor is a pair, because received_at is not unique", () => {
+  const at = (ms, id) => store.insert({
+    id, received_at: ms, game: TIED, version: "", kind: "error",
+    signature: "sig", title: "t", message: "m", stack: "", log: "",
+    platform: "", gpu: "", engine: "", session: "", player: "", context: "{}",
+  });
+  at(T0 + 2, "tie-a");
+  at(T0 + 1, "tie-b1");
+  at(T0 + 1, "tie-b2");
+  at(T0 + 1, "tie-b3");
+  at(T0, "tie-c");
+
+  // Newest first, ties broken by id descending, which is a total order.
+  const order = store.list({ game: TIED, limit: 10 }).map((r) => r.id);
+  assert.deepEqual(order, ["tie-a", "tie-b3", "tie-b2", "tie-b1", "tie-c"]);
+
+  // Two at a time, so the second page starts in the middle of the tie.
+  const pair = [];
+  let cur;
+  for (let page = 0; page < 10; page++) {
+    const rows = store.list({ game: TIED, limit: 2, before: cur?.before, beforeId: cur?.beforeId });
+    if (!rows.length) break;
+    pair.push(...rows.map((r) => r.id));
+    const last = rows[rows.length - 1];
+    cur = { before: last.received_at, beforeId: last.id };
+  }
+  assert.deepEqual(pair, order, "the pair walks every row, in order, exactly once");
+
+  // The same walk with the timestamp alone, which is what shipped first.
+  const lone = [];
+  let before;
+  for (let page = 0; page < 10; page++) {
+    const rows = store.list({ game: TIED, limit: 2, before });
+    if (!rows.length) break;
+    lone.push(...rows.map((r) => r.id));
+    const last = rows[rows.length - 1].received_at;
+    if (last === before) break;
+    before = last;
+  }
+  assert.deepEqual(lone, ["tie-a", "tie-b3", "tie-c"],
+    "asking for strictly older skips the rest of the millisecond it stopped on");
+  assert.equal(lone.length, 3, "three of the five, and no error to say so");
+});
+
+test("a burst of reports pages completely, however its timestamps fall", async () => {
+  await postBurst(60, (i) => ({ kind: "error", message: "burst " + i }));
+  const all = await fetch(`${base}/v1/reports?game=${PAGED}&limit=200`).then((r) => r.json());
+  assert.equal(all.reports.length, 60);
+
+  const { seen, pages } = await walk("/v1/reports", "reports", 7);
+  assert.ok(pages > 1, "seven at a time should take several pages");
+  assert.equal(seen.length, 60, "every report comes back");
+  assert.equal(new Set(seen.map((r) => r.id)).size, 60, "and none of them twice");
+});
+
+test("the timestamp-only cursor is still accepted, so anything using it still reads", async () => {
+  const first = await fetch(`${base}/v1/reports?game=${PAGED}&limit=5`).then((r) => r.json());
+  const edge = first.reports[first.reports.length - 1].received_at;
+  const res = await fetch(`${base}/v1/reports?game=${PAGED}&limit=5&before=${edge}`);
+  assert.equal(res.status, 200, "the shape that shipped first is not an error");
+  const { reports } = await res.json();
+  assert.ok(reports.every((r) => r.received_at < edge), "and it means what it always meant");
+});
+
+test("the last page carries no cursor, so a Load more link stops existing", async () => {
+  const body = await fetch(`${base}/v1/reports?game=${PAGED}&limit=200`).then((r) => r.json());
+  assert.equal(body.reports.length, 60);
+  assert.equal(body.next, undefined, "a page that is not full is the end of the list");
+
+  const full = await fetch(`${base}/v1/reports?game=${PAGED}&limit=60`).then((r) => r.json());
+  assert.ok(full.next, "a full page offers the cursor for what might be behind it");
+  assert.equal(typeof full.next.before, "number");
+  assert.equal(typeof full.next.before_id, "string");
+});
+
+test("the issue rollup pages too, on last_seen and the signature", async () => {
+  // Distinct faults, so these are distinct signatures rather than one group.
+  await postBurst(40, (i) => ({
+    kind: "crash",
+    message: "Nonexistent function 'fn_" + i + "' in base 'Panel'",
+    stack: "at: res://scripts/mod_" + i + ".gd:" + (100 + i) + " @ _refresh_" + i + "()",
+  }));
+  const all = await fetch(`${base}/v1/signatures?game=${PAGED}&limit=200`).then((r) => r.json());
+  const total = all.signatures.length;
+  assert.ok(total >= 40, "each distinct fault is its own issue");
+
+  const { seen, pages } = await walk("/v1/signatures", "signatures", 6);
+  assert.ok(pages > 1);
+  assert.equal(seen.length, total, "every issue comes back");
+  assert.equal(new Set(seen.map((s) => s.signature)).size, total, "and none of them twice");
+});
+
+test("a nonsense limit is the default rather than a refusal", async () => {
+  for (const limit of ["", "0", "-5", "banana"]) {
+    const res = await fetch(`${base}/v1/reports?game=${PAGED}&limit=${limit}`);
+    assert.equal(res.status, 200, `?limit=${limit} should still read`);
+    const { reports } = await res.json();
+    assert.equal(reports.length, 50, "which is the default page");
+  }
+  // And one over the cap is the cap, not the number asked for.
+  const { reports } = await fetch(`${base}/v1/reports?game=${PAGED}&limit=9999`).then((r) => r.json());
+  assert.ok(reports.length <= 200, "the hard cap still holds");
+});
+
+// ---------------------------------------------------------------------------
 // Addresses. A view you cannot link to is one you can only describe out loud,
 // so every view the portal draws has an address, and the two halves of that
 // are tested here: the server serves the page at each shape, and the page

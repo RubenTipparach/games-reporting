@@ -84,6 +84,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .outcome-failed    { color: var(--crash); }
 .outcome-quit      { color: var(--warn); }
 .outcome-crashed   { color: var(--crash); font-weight: 600; }
+/* Still running. Not an outcome, because it has not had one yet. */
+.outcome-live      { color: #6fd08c; font-weight: 600; }
 .crashy            { color: var(--crash); }
 a.btn.mode         { padding: 3px 8px; font-size: 12px; }
 .kind-crash { color: var(--crash); }
@@ -106,6 +108,7 @@ pre {
 .gate p { color: var(--dim); }
 .err { color: var(--crash); }
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
+.more { display: flex; gap: 10px; align-items: center; margin: 14px 0 0; }
 `;
 
 // Kept as a plain function so the page is one file. It is only ever inserted
@@ -242,10 +245,18 @@ function navigate(url) {
 // offers "copy link address", which is most of the point of having addresses.
 document.addEventListener("click", (e) => {
   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-  const a = e.target.closest && e.target.closest('a[href^="/"]');
-  if (!a) return;
-  e.preventDefault();
-  navigate(a.getAttribute("href"));
+  if (!e.target.closest) return;
+  const a = e.target.closest('a[href^="/"]');
+  if (a) {
+    e.preventDefault();
+    navigate(a.getAttribute("href"));
+    return;
+  }
+  // A whole row is a bigger target than the link inside it, so the row takes
+  // the click too. Delegated like the links, which is what lets rows appended
+  // by Load more work without being wired up a second time.
+  const tr = e.target.closest("tr[data-href]");
+  if (tr) navigate(tr.dataset.href);
 });
 
 // The back and forward buttons, which now work, because there is something for
@@ -340,12 +351,92 @@ function where(s) {
   return "d" + s.depth_min + "-d" + s.depth_max;
 }
 
+// ---------------------------------------------------------------------------
+// Paging, for the two top-level lists.
+//
+// A list is the newest page of something that keeps growing; the sessions view
+// and the runs inside one are not paged, because a session is a bounded thing
+// and once it is open there is nothing behind it to page to.
+//
+// Load more APPENDS rather than replacing, so reading down a long list does not
+// throw away what you already read, and it does not touch the address: what is
+// shareable is the view, not how far somebody happened to scroll it.
+
+// The filters the current view is showing, which the next page has to repeat -
+// a second page filtered differently from the first is not the same list.
+function listQuery(kind) {
+  const q = new URLSearchParams();
+  if (state.game) q.set("game", state.game);
+  if (kind === "reports" && state.signature) q.set("signature", state.signature);
+  return q;
+}
+
+// Only drawn when the service handed back a cursor, which it only does when
+// the page came back full. A "more" button pointing at nothing is worse than
+// no button.
+function moreBar(kind, next) {
+  if (!next) return "";
+  return '<p class="more"><button id="more" data-kind="' + esc(kind) +
+    '" data-before="' + esc(next.before) +
+    '" data-before-id="' + esc(next.before_id) + '">Load more</button>' +
+    '<span class="dim" id="shown"></span></p>';
+}
+
+function countShown() {
+  const el = document.getElementById("shown");
+  if (!el) return;
+  const n = app.querySelectorAll("tbody tr").length;
+  // Once the button has gone there is nothing behind the list, and saying so
+  // is the difference between "the first 70" and "all 70".
+  el.textContent = document.getElementById("more") ? n + " shown" : "all " + n + " shown";
+}
+
+async function loadMore(btn) {
+  const kind = btn.dataset.kind;
+  const q = listQuery(kind);
+  q.set("before", btn.dataset.before);
+  q.set("before_id", btn.dataset.beforeId);
+  btn.disabled = true;
+  btn.textContent = "Loading...";
+  let body;
+  try {
+    body = await api("/v1/" + kind + "?" + q.toString());
+  } catch (err) {
+    // The list already on screen is still good, so say what went wrong next to
+    // the button rather than replacing the page with an error.
+    btn.disabled = false;
+    btn.textContent = "Load more";
+    const el = document.getElementById("shown");
+    if (el) el.textContent = err.unauthorized ? "that key stopped working" : err.message;
+    return;
+  }
+  const rows = body[kind];
+  const tbody = app.querySelector("tbody");
+  if (tbody && rows.length) {
+    tbody.insertAdjacentHTML("beforeend",
+      kind === "signatures" ? sigRows(rows) : reportRows(rows));
+  }
+  if (body.next) {
+    btn.dataset.before = body.next.before;
+    btn.dataset.beforeId = body.next.before_id;
+    btn.disabled = false;
+    btn.textContent = "Load more";
+  } else {
+    btn.remove();
+  }
+  countShown();
+}
+
 async function viewSignatures() {
-  const q = state.game ? "?game=" + encodeURIComponent(state.game) : "";
-  const { signatures } = await api("/v1/signatures" + q);
+  const body = await api("/v1/signatures?" + listQuery("signatures").toString());
+  const signatures = body.signatures;
   if (!signatures.length) return '<div class="empty">Nothing reported yet.</div>';
   return '<table><thead><tr><th>Count</th><th>Players</th><th>What</th><th>Where</th><th>Versions</th><th>Last seen</th></tr></thead><tbody>' +
-    signatures.map((s) => {
+    sigRows(signatures) + '</tbody></table>' + moreBar("signatures", body.next);
+}
+
+function sigRows(signatures) {
+  return signatures.map((s) => {
       // The row and the link point at the same place. The row is what gets
       // clicked; the link is what gets copied, and what a middle-click opens.
       const at = esc(to({ view: "reports", signature: s.signature }));
@@ -358,20 +449,22 @@ async function viewSignatures() {
         '<td class="dim">' + esc(s.versions || "-") + '</td>' +
         '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
         '</tr>';
-    }).join("") + '</tbody></table>';
+    }).join("");
 }
 
 async function viewReports() {
-  const q = new URLSearchParams();
-  if (state.game) q.set("game", state.game);
-  if (state.signature) q.set("signature", state.signature);
-  const { reports } = await api("/v1/reports?" + q.toString());
+  const body = await api("/v1/reports?" + listQuery("reports").toString());
+  const reports = body.reports;
   if (!reports.length) return '<div class="empty">No reports match.</div>';
   const back = state.signature
     ? '<p class="crumb"><a class="btn" href="' + esc(to({ view: "signatures" })) + '">Back to issues</a>' +
       '<span class="dim">signature ' + esc(state.signature) + '</span></p>' : "";
   return back + '<table><thead><tr><th>When</th><th>What</th><th>Version</th><th>Platform</th><th>Player</th></tr></thead><tbody>' +
-    reports.map((r) =>
+    reportRows(reports) + '</tbody></table>' + moreBar("reports", body.next);
+}
+
+function reportRows(reports) {
+  return reports.map((r) =>
       '<tr data-href="' + esc(to({ report: r.id })) + '">' +
       '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
       '<td><a href="' + esc(to({ report: r.id })) + '">' +
@@ -379,7 +472,7 @@ async function viewReports() {
       '<td class="dim">' + esc(r.version || "-") + '</td>' +
       '<td class="dim">' + esc(r.platform || "-") + '</td>' +
       '<td class="dim">' + esc(r.player || "-") + '</td>' +
-      '</tr>').join("") + '</tbody></table>';
+      '</tr>').join("");
 }
 
 // A playtest, read from the outside in:
@@ -433,7 +526,12 @@ async function viewSessionList() {
   const lengths = sessions.map((s) => Number(s.seconds) || 0).sort((a, b) => a - b);
   const mid = Math.floor(lengths.length / 2);
   const med = lengths.length % 2 ? lengths[mid] : Math.round((lengths[mid - 1] + lengths[mid]) / 2);
-  const crashed = sessions.filter((s) => s.ended_in_crash).length;
+  // A session still checking in has not ended, so it is not evidence either
+  // way about how sessions end. Counting it as "closed normally" is what makes
+  // a crash rate drift down every time somebody leaves the game open.
+  const live = sessions.filter((s) => s.live).length;
+  const done = sessions.filter((s) => !s.live);
+  const crashed = done.filter((s) => s.ended_in_crash).length;
 
   const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
       '<dl class="kv"><dt>played</dt><dd>' + sessions.length + '</dd>' +
@@ -448,10 +546,12 @@ async function viewSessionList() {
         (total ? ' <span class="dim">' + Math.round(((total - totalPlayed) / total) * 100) + '%</span>' : '') +
         '</dd></dl></div>' +
     '<div class="block"><h4>How they ended</h4>' +
-      '<dl class="kv"><dt>closed normally</dt><dd>' + (sessions.length - crashed) + '</dd>' +
+      '<dl class="kv"><dt>closed normally</dt><dd>' + (done.length - crashed) + '</dd>' +
       '<dt class="crashy">ended in a crash</dt><dd class="crashy">' + crashed + '</dd>' +
       '<dt>crash rate</dt><dd>' +
-        (sessions.length ? Math.round((crashed / sessions.length) * 100) : 0) + '%</dd></dl></div>' +
+        (done.length ? Math.round((crashed / done.length) * 100) : 0) + '%</dd>' +
+      (live ? '<dt class="outcome-live">still open</dt><dd class="outcome-live">' + live +
+              '</dd>' : '') + '</dl></div>' +
     '</div>';
 
   const table = '<table><thead><tr>' +
@@ -471,9 +571,15 @@ async function viewSessionList() {
       '<td class="dim">' + esc(s.modes || "-") + '</td>' +
       '<td>' + tally(s) + '</td>' +
       '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
-      '<td>' + (s.ended_in_crash
-        ? '<span class="outcome-crashed">crashed</span>'
-        : '<span class="dim">closed</span>') + '</td>' +
+      // Three states, not two. A session that is still checking in has not
+      // ended at all, and drawing it as "closed" or "crashed" is the portal
+      // reporting an outcome that has not happened.
+      '<td>' + (s.live
+        ? '<span class="outcome-live">live</span>' +
+          '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
+        : s.ended_in_crash
+          ? '<span class="outcome-crashed">crashed</span>'
+          : '<span class="dim">closed</span>') + '</td>' +
       '</tr>').join("") + '</tbody></table>';
 
   return head + table;
@@ -771,16 +877,11 @@ async function render() {
     app.innerHTML = '<div class="card err">' + esc(err.message) + '</div>';
     return;
   }
-  // A whole row is a bigger target than the link inside it, so the row still
-  // takes the click - except when the click was ON that link, which the
-  // document handler has already dealt with and which would otherwise be two
-  // navigations to the same place.
-  app.querySelectorAll("tr[data-href]").forEach((tr) => {
-    tr.onclick = (e) => {
-      if (e.target.closest && e.target.closest("a")) return;
-      navigate(tr.dataset.href);
-    };
-  });
+  const more = document.getElementById("more");
+  if (more) {
+    more.onclick = () => loadMore(more);
+    countShown();
+  }
 }
 
 // The address is the input, not the output: whatever it says on arrival is

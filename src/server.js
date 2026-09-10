@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
-import { openDatabase } from "./db.js";
+import { openDatabase, PAGE, pageLimit } from "./db.js";
 import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
@@ -222,6 +222,20 @@ function isPagePath(path) {
   return PAGE_ROUTES.some((re) => re.test(path));
 }
 
+// The cursor a caller hands back to get the next page: the sort key of the
+// last row, in both its parts. It is only offered when the page came back
+// full, since a short page is the end of the list and a "more" link pointing
+// at nothing is worse than no link.
+//
+// Two fields rather than one opaque blob because they are both already in the
+// row the caller is holding, and a cursor somebody can read is a cursor
+// somebody can debug.
+function nextCursor(rows, limit, key, id) {
+  if (rows.length < limit) return undefined;
+  const last = rows[rows.length - 1];
+  return { before: last[key], before_id: last[id] };
+}
+
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -257,26 +271,33 @@ function handleRequest(req, res, url) {
   if (path === "/v1/reports" && req.method === "GET") {
     if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
-    return send(res, 200, {
-      reports: store.list({
-        game: q.get("game") || undefined,
-        kind: q.get("kind") || undefined,
-        signature: q.get("signature") || undefined,
-        before: q.get("before") ? Number(q.get("before")) : undefined,
-        limit: q.get("limit") ? Number(q.get("limit")) : 50,
-      }),
+    const limit = pageLimit(q.get("limit"), PAGE.reports);
+    const reports = store.list({
+      game: q.get("game") || undefined,
+      kind: q.get("kind") || undefined,
+      signature: q.get("signature") || undefined,
+      before: q.get("before") ? Number(q.get("before")) : undefined,
+      beforeId: q.get("before_id") || undefined,
+      limit,
     });
+    const next = nextCursor(reports, limit, "received_at", "id");
+    return send(res, 200, next ? { reports, next } : { reports });
   }
 
   if (path === "/v1/signatures" && req.method === "GET") {
     if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
-    return send(res, 200, {
-      signatures: store.signatures({
-        game: q.get("game") || undefined,
-        limit: q.get("limit") ? Number(q.get("limit")) : 50,
-      }),
+    const limit = pageLimit(q.get("limit"), PAGE.signatures);
+    const signatures = store.signatures({
+      game: q.get("game") || undefined,
+      before: q.get("before") ? Number(q.get("before")) : undefined,
+      beforeId: q.get("before_id") || undefined,
+      limit,
     });
+    // The rollup's sort key is when the issue was last seen, and its tiebreak
+    // is the signature itself.
+    const next = nextCursor(signatures, limit, "last_seen", "signature");
+    return send(res, 200, next ? { signatures, next } : { signatures });
   }
 
   // Runs are their own listing, not a filter on the fault list, because the
@@ -290,7 +311,7 @@ function handleRequest(req, res, url) {
         game: q.get("game") || undefined,
         session: q.get("session") || undefined,
         mode: q.get("mode") || undefined,
-        limit: q.get("limit") ? Number(q.get("limit")) : 100,
+        limit: pageLimit(q.get("limit"), PAGE.runs),
       }),
     });
   }
@@ -303,7 +324,11 @@ function handleRequest(req, res, url) {
     return send(res, 200, {
       sessions: store.sessions({
         game: q.get("game") || undefined,
-        limit: q.get("limit") ? Number(q.get("limit")) : 100,
+        limit: pageLimit(q.get("limit"), PAGE.sessions),
+        // The window a session has to check in inside to still count as
+        // running. Both halves come from config so they can be moved with the
+        // game's own heartbeat rather than by editing a query.
+        staleAfter: config.heartbeatSeconds * config.heartbeatStaleFactor * 1000,
       }),
     });
   }
