@@ -75,9 +75,9 @@ opens on the thing you were looking at.
 
 | Address | What it opens on |
 | --- | --- |
-| `/` or `/issues` | The issue rollup, which is the front page |
+| `/` or `/issues` | The issue rollup, which is the front page, with **Load more** |
 | `/issues/<signature>` | The reports behind one issue |
-| `/reports` | Every report, newest first |
+| `/reports` | Every report, newest first, with **Load more** |
 | `/reports/<id>` | One report in full, with its stack, context and log |
 | `/sessions` | Every session, with the playtime totals |
 | `/sessions/<session>` | One session: its runs and how far they got |
@@ -99,9 +99,9 @@ around the key.
 | --- | --- | --- |
 | `GET /healthz` | none | Liveness, plus how many reports are held |
 | `POST /v1/reports` | ingest | Take a report |
-| `GET /v1/reports` | admin | List, newest first |
+| `GET /v1/reports` | admin | List, newest first; paged by cursor |
 | `GET /v1/reports/:id` | admin | One report, in full, with its log |
-| `GET /v1/signatures` | admin | One row per distinct crash, with counts |
+| `GET /v1/signatures` | admin | One row per distinct crash, with counts; paged |
 | `GET /v1/sessions` | admin | One row per session, with playtime and outcome |
 | `GET /v1/runs` | admin | Run summaries, filterable by session and mode |
 | `DELETE /v1/reports/:id` | admin | Drop one |
@@ -171,9 +171,34 @@ Then pull the reports behind one of them:
 curl -s "https://games-reporting.fly.dev/v1/reports?signature=3f9a..." | jq
 ```
 
-Paging is by cursor, not offset: pass the `received_at` of the last row you saw
-as `before=`, so a page cannot skip or repeat a row when new reports land
-mid-read.
+Paging is by cursor, not offset, and the cursor is a **pair**: the sort key of
+the last row you saw and its tiebreak. The reply hands you the next one ready
+to send back, so in practice you copy it rather than build it:
+
+```json
+{"reports": [ ... 50 rows ... ],
+ "next": {"before": 1757400000123, "before_id": "8f2c...-...-..."}}
+```
+
+```bash
+curl -s "$URL/v1/reports?before=1757400000123&before_id=8f2c...-...-..."
+```
+
+`next` is only present when the page came back full, so its absence is the end
+of the list. `/v1/signatures` pages the same way, with `last_seen` and the
+signature as the pair.
+
+The pair is not decoration. `received_at` is a millisecond and is **not
+unique**: sixty reports posted at once land on about twenty seven distinct
+milliseconds, and a cursor of the timestamp alone asks for everything strictly
+older than the last row's, skipping whatever else shared it - paging that burst
+returned 53 of the 60. A log scrape uploading a backlog is exactly that shape.
+Sending `before=` on its own is still accepted, and still loses rows that way;
+send both.
+
+Neither `/v1/sessions` nor `/v1/runs` is paged. A session is a bounded thing
+and a run belongs to one, so once you have opened a session there is nothing
+behind it to page to; both take a `limit` and nothing more.
 
 ### How reports are grouped
 
@@ -231,4 +256,5 @@ file, since the choice is read once at boot), reading refused without the admin
 key, grouping across builds and machines, Steam ids provably absent from the
 stored row, distinct players counted without being named, the portal holding no
 data of its own, the body cap, the rate limit and its refill, the log tail, the
-refusals, and every page address round-tripping to the view it names.
+refusals, every page address round-tripping to the view it names, and the
+cursor recovering every row of a burst that shares timestamps.

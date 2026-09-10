@@ -231,6 +231,131 @@ test("the page's own script parses", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Paging the two top-level lists.
+//
+// The cursor is (sort key, tiebreak) rather than the sort key alone, and these
+// exist because the sort key alone lost rows. Nothing here waits or sleeps: the
+// ties are made by posting a burst, which is how they occur in the wild.
+
+// Everything in one game of its own, so the reports the rest of this file
+// posted cannot pad or skew the counts.
+const PAGED = "paging-fixture";
+
+async function postBurst(n, shape) {
+  await Promise.all(Array.from({ length: n }, (_, i) =>
+    fetch(`${base}/v1/reports`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ game: PAGED, ...shape(i) }),
+    })));
+}
+
+// Walks a list with the cursor the service hands back, and reports what it saw.
+async function walk(path, key, pageSize, extra = {}) {
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  for (;;) {
+    const q = new URLSearchParams({ game: PAGED, limit: String(pageSize), ...extra });
+    if (cursor) {
+      q.set("before", String(cursor.before));
+      q.set("before_id", String(cursor.before_id));
+    }
+    const body = await fetch(`${base}${path}?${q}`).then((r) => r.json());
+    if (!body[key].length) break;
+    pages += 1;
+    seen.push(...body[key]);
+    if (!body.next) break;
+    cursor = body.next;
+    assert.ok(pages < 50, "the cursor should terminate, not run forever");
+  }
+  return { seen, pages };
+}
+
+test("a burst of reports shares timestamps, which is what the cursor has to survive", async () => {
+  await postBurst(60, (i) => ({ kind: "error", message: "burst " + i }));
+  const all = await fetch(`${base}/v1/reports?game=${PAGED}&limit=200`).then((r) => r.json());
+  assert.equal(all.reports.length, 60);
+
+  const perMs = new Map();
+  for (const r of all.reports) perMs.set(r.received_at, (perMs.get(r.received_at) || 0) + 1);
+  assert.ok(perMs.size < 60,
+    "sixty reports posted at once should land on fewer than sixty milliseconds; " +
+    "if they ever do not, this test has stopped covering the thing it was written for");
+});
+
+test("paging reports keeps every row exactly once, ties and all", async () => {
+  const { seen, pages } = await walk("/v1/reports", "reports", 7);
+  assert.ok(pages > 1, "seven at a time should take several pages");
+  assert.equal(seen.length, 60, "every report comes back");
+  assert.equal(new Set(seen.map((r) => r.id)).size, 60, "and none of them twice");
+});
+
+test("the cursor by timestamp alone is still accepted, and still loses rows", async () => {
+  // The shape the first version of this documented. Kept working so a script
+  // written against it does not break, and asserted to be lossy so nobody
+  // mistakes it for the one to use.
+  const seen = new Set();
+  let before;
+  for (let page = 0; page < 50; page++) {
+    const q = new URLSearchParams({ game: PAGED, limit: "7" });
+    if (before !== undefined) q.set("before", String(before));
+    const { reports } = await fetch(`${base}/v1/reports?${q}`).then((r) => r.json());
+    if (!reports.length) break;
+    for (const r of reports) seen.add(r.id);
+    const last = reports[reports.length - 1].received_at;
+    if (last === before) break;
+    before = last;
+  }
+  assert.ok(seen.size < 60,
+    "paging by timestamp alone skips whatever shared the last row's millisecond");
+});
+
+test("the last page carries no cursor, so a Load more link stops existing", async () => {
+  const body = await fetch(`${base}/v1/reports?game=${PAGED}&limit=200`).then((r) => r.json());
+  assert.equal(body.reports.length, 60);
+  assert.equal(body.next, undefined, "a page that is not full is the end of the list");
+
+  const full = await fetch(`${base}/v1/reports?game=${PAGED}&limit=60`).then((r) => r.json());
+  assert.ok(full.next, "a full page offers the cursor for what might be behind it");
+  assert.equal(typeof full.next.before, "number");
+  assert.equal(typeof full.next.before_id, "string");
+});
+
+test("the issue rollup pages too, and its ties are the same problem", async () => {
+  // Distinct faults, so these are distinct signatures rather than one group.
+  await postBurst(40, (i) => ({
+    kind: "crash",
+    message: "Nonexistent function 'fn_" + i + "' in base 'Panel'",
+    stack: "at: res://scripts/mod_" + i + ".gd:" + (100 + i) + " @ _refresh_" + i + "()",
+  }));
+  const all = await fetch(`${base}/v1/signatures?game=${PAGED}&limit=200`).then((r) => r.json());
+  const total = all.signatures.length;
+  assert.ok(total >= 40, "each distinct fault is its own issue");
+
+  const perMs = new Map();
+  for (const s of all.signatures) perMs.set(s.last_seen, (perMs.get(s.last_seen) || 0) + 1);
+  assert.ok(perMs.size < total, "and they share last_seen values, being one burst");
+
+  const { seen, pages } = await walk("/v1/signatures", "signatures", 6);
+  assert.ok(pages > 1);
+  assert.equal(seen.length, total, "every issue comes back");
+  assert.equal(new Set(seen.map((s) => s.signature)).size, total, "and none of them twice");
+});
+
+test("a nonsense limit is the default rather than a refusal", async () => {
+  for (const limit of ["", "0", "-5", "banana"]) {
+    const res = await fetch(`${base}/v1/reports?game=${PAGED}&limit=${limit}`);
+    assert.equal(res.status, 200, `?limit=${limit} should still read`);
+    const { reports } = await res.json();
+    assert.equal(reports.length, 50, "which is the default page");
+  }
+  // And one over the cap is the cap, not the number asked for.
+  const { reports } = await fetch(`${base}/v1/reports?game=${PAGED}&limit=9999`).then((r) => r.json());
+  assert.ok(reports.length <= 200, "the hard cap still holds");
+});
+
+// ---------------------------------------------------------------------------
 // Addresses. A view you cannot link to is one you can only describe out loud,
 // so every view the portal draws has an address, and the two halves of that
 // are tested here: the server serves the page at each shape, and the page

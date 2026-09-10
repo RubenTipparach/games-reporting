@@ -11,6 +11,25 @@ import { join } from "node:path";
 // is run on two machines at once, so this app is deliberately a single machine
 // (see fly.toml). If it ever needs to be two, this is the file that changes.
 
+// How big a page each listing hands back, and how big a caller may ask for.
+// Exported because the routes clamp with these too: the route needs the same
+// number the query used to tell whether a full page means there is more behind
+// it, and two copies of that number is one copy too many.
+export const PAGE = {
+  reports:    { fallback: 50,  max: 200 },
+  signatures: { fallback: 50,  max: 200 },
+  runs:       { fallback: 100, max: 500 },
+  sessions:   { fallback: 100, max: 500 },
+};
+
+// A limit from a query string: absent, empty or nonsense means the default
+// rather than an error, since a bad ?limit= is not worth refusing a read over.
+export function pageLimit(asked, { fallback, max }) {
+  const n = Number(asked);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), max);
+}
+
 // The table, as data rather than as one SQL string, because it is read twice:
 // once to create the table on a fresh volume and once to work out what an
 // EXISTING volume is missing. `CREATE TABLE IF NOT EXISTS` does nothing at all
@@ -119,11 +138,19 @@ export function openDatabase(dataDir) {
       return stmts.count.get().n;
     },
 
-    // The listing. Filters are optional and compose; `before` is the cursor,
-    // which is the received_at of the last row of the previous page, so paging
-    // cannot skip or repeat a row when new reports land mid-read the way an
-    // OFFSET would.
-    list({ game, kind, signature, before, limit = 50 } = {}) {
+    // The listing. Filters are optional and compose, and `before` plus
+    // `beforeId` are the cursor: the received_at AND the id of the last row of
+    // the previous page. Both, because received_at is not unique.
+    //
+    // It used to be the timestamp alone, and that quietly dropped rows. Sixty
+    // reports posted at once land on about twenty seven distinct milliseconds,
+    // and asking for everything strictly older than the last row's timestamp
+    // skips whatever else shared it: paging that burst returned 53 of the 60.
+    // A log scrape uploading a backlog is exactly that shape.
+    //
+    // The pair is unique because the id is, so the order is total and every
+    // row sits in exactly one page.
+    list({ game, kind, signature, before, beforeId, limit = 50 } = {}) {
       const where = [];
       const args = {};
       if (game) {
@@ -139,16 +166,25 @@ export function openDatabase(dataDir) {
         args.signature = signature;
       }
       if (before) {
-        where.push("received_at < @before");
         args.before = before;
+        if (beforeId) {
+          // Strictly older, or the same instant and further down the tie.
+          where.push("(received_at < @before OR (received_at = @before AND id < @beforeId))");
+          args.beforeId = beforeId;
+        } else {
+          // A caller paging by timestamp alone, which is what the first
+          // version of this documented. Still honoured, still able to skip a
+          // tie - which is why nothing in this repo pages that way any more.
+          where.push("received_at < @before");
+        }
       }
-      args.limit = Math.min(Math.max(1, limit), 200);
+      args.limit = Math.min(Math.max(1, limit), PAGE.reports.max);
       const sql = `
         SELECT id, received_at, game, version, kind, signature, title,
                platform, gpu, engine, session, player
         FROM reports
         ${where.length ? "WHERE " + where.join(" AND ") : ""}
-        ORDER BY received_at DESC
+        ORDER BY received_at DESC, id DESC
         LIMIT @limit
       `;
       return db.prepare(sql).all(args);
@@ -156,8 +192,8 @@ export function openDatabase(dataDir) {
 
     // One row per distinct crash, which is the view worth opening first: what
     // is happening, how often, since when, and on which builds.
-    signatures({ game, limit = 50, kinds } = {}) {
-      const args = { limit: Math.min(Math.max(1, limit), 200) };
+    signatures({ game, limit = 50, kinds, before, beforeId } = {}) {
+      const args = { limit: Math.min(Math.max(1, limit), PAGE.signatures.max) };
       // Faults only unless the caller says otherwise. Run summaries arrive on
       // the same endpoint and share the table, but they are not things that
       // went wrong, and grouping them as issues would put "cleared at depth 2"
@@ -171,6 +207,18 @@ export function openDatabase(dataDir) {
         args.game = game;
       }
       const filter = "WHERE " + where.join(" AND ");
+      // The cursor for a rollup has to be a HAVING, not a WHERE: last_seen is
+      // MAX(received_at), which does not exist until the rows are grouped. The
+      // signature is the GROUP BY key and so is unique per row, which makes
+      // (last_seen, signature) a total order the same way (received_at, id) is
+      // for the listing above.
+      const having = before
+        ? (beforeId
+            ? "HAVING (MAX(received_at) < @before OR (MAX(received_at) = @before AND signature < @beforeId))"
+            : "HAVING MAX(received_at) < @before")
+        : "";
+      if (before) args.before = before;
+      if (before && beforeId) args.beforeId = beforeId;
       return db
         .prepare(`
           SELECT signature,
@@ -195,7 +243,8 @@ export function openDatabase(dataDir) {
           FROM reports
           ${filter}
           GROUP BY signature
-          ORDER BY last_seen DESC
+          ${having}
+          ORDER BY last_seen DESC, signature DESC
           LIMIT @limit
         `)
         .all(args);
@@ -205,7 +254,7 @@ export function openDatabase(dataDir) {
     // fault and the columns worth seeing are different ones: how it ended, how
     // long it took, how far it got.
     runs({ game, session, mode, limit = 100 } = {}) {
-      const args = { limit: Math.min(Math.max(1, limit), 500) };
+      const args = { limit: Math.min(Math.max(1, limit), PAGE.runs.max) };
       let filter = "WHERE kind = 'run'";
       if (game) {
         filter += " AND game = @game";
@@ -253,7 +302,7 @@ export function openDatabase(dataDir) {
     // session marker - that report is posted by the NEXT launch and carries
     // the dead session's id, which is exactly what makes this knowable.
     sessions({ game, limit = 100 } = {}) {
-      const args = { limit: Math.min(Math.max(1, limit), 500) };
+      const args = { limit: Math.min(Math.max(1, limit), PAGE.sessions.max) };
       let filter = "WHERE session <> ''";
       if (game) {
         filter += " AND game = @game";
