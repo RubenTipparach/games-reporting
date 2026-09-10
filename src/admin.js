@@ -52,7 +52,7 @@ tbody tr:hover { background: #1b2029; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .where { color: #6fd08c; white-space: nowrap; }
 .bars { display: grid; gap: 9px; }
-.bar-row { display: grid; grid-template-columns: 84px 1fr 70px 68px; gap: 12px; align-items: center; }
+.bar-row { display: grid; grid-template-columns: 84px 1fr 96px 210px; gap: 12px; align-items: center; }
 .bar-track { background: #10151c; border: 1px solid var(--line); border-radius: 2px; height: 17px; position: relative; overflow: hidden; }
 .bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .55; }
 .bar-val { text-align: right; font-variant-numeric: tabular-nums; }
@@ -365,31 +365,57 @@ async function viewOneSession() {
       '<td class="num dim">' + esc(r.mech_level == null ? "-" : r.mech_level) + '</td>' +
       '</tr>').join("") + '</tbody></table>';
 
-  // Median per depth, within this session and mode. Median rather than mean,
-  // because one run quit at twenty seconds drags a mean down and says nothing
-  // about how long a depth takes.
+  // HOW FAR THEY GOT, not how long it took. A playtest asks how much of a
+  // depth a player survived, and every campaign depth is ten waves, so that is
+  // a share of a known whole.
+  //
+  // It is drawn against an ABSOLUTE scale of ten rather than against the
+  // longest bar on screen. A relative scale makes a single run fill the track
+  // whatever it did - one run that died on wave 0 rendered as a full bar,
+  // which is the opposite of the truth. Against ten, a wave 0 run is an empty
+  // track, which is what happened.
   const byDepth = new Map();
   for (const r of runs) {
     const d = r.depth == null ? "?" : r.depth;
     if (!byDepth.has(d)) byDepth.set(d, []);
-    byDepth.get(d).push(Number(r.seconds) || 0);
+    byDepth.get(d).push(r);
   }
   const median = (xs) => {
     const v = [...xs].sort((a, b) => a - b);
+    if (!v.length) return 0;
     const m = Math.floor(v.length / 2);
     return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
   };
-  const meds = [...byDepth.entries()]
+  // Ten waves to a campaign depth. Survival has no contract length, so its
+  // bars scale to the furthest anybody actually reached instead.
+  const WAVES_PER_DEPTH = 10;
+  const reached = [...byDepth.entries()]
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-    .map(([d, xs]) => [d, median(xs), xs.length]);
-  const peak = Math.max(1, ...meds.map((m) => m[1]));
-  const bars = '<div class="card"><h2>Median time per depth</h2><div class="bars">' +
-    meds.map(([d, med, n]) =>
+    .map(([d, rs]) => [
+      d,
+      median(rs.map((r) => Number(r.wave) || 0)),
+      median(rs.map((r) => Number(r.seconds) || 0)),
+      rs.length,
+      rs.filter((r) => r.outcome === "succeeded").length,
+    ]);
+  const survival = runs.length > 0 && runs.every((r) => r.mode === "survival");
+  const scale = survival
+    ? Math.max(1, ...reached.map((r) => r[1]))
+    : WAVES_PER_DEPTH;
+
+  const bars = '<div class="card"><h2>How far they got</h2><div class="bars">' +
+    reached.map(([d, wave, secs, n, won]) =>
       '<div class="bar-row"><span>Depth ' + esc(d) + '</span>' +
-      '<span class="bar-track"><span class="bar-fill" style="width:' +
-        Math.round((med / peak) * 100) + '%"></span></span>' +
-      '<span class="bar-val">' + esc(mmss(med)) + '</span>' +
-      '<span class="dim">' + n + ' run' + (n === 1 ? "" : "s") + '</span></div>').join("") +
+      '<span class="bar-track">' +
+        // The cleared share is drawn solid over the reached bar, so a depth
+        // people finish looks different from one they merely survive into.
+        '<span class="bar-fill" style="width:' +
+          Math.round((Math.min(wave, scale) / scale) * 100) + '%"></span>' +
+        '</span>' +
+      '<span class="bar-val">wave ' + esc(wave) +
+        (survival ? '' : ' <span class="dim">/ ' + WAVES_PER_DEPTH + '</span>') + '</span>' +
+      '<span class="dim">' + esc(mmss(secs)) + ' &middot; ' + n + ' run' + (n === 1 ? "" : "s") +
+        (won ? ', ' + won + ' cleared' : '') + '</span></div>').join("") +
     '</div></div>';
 
   return crumb + modeBar + bars + table;
