@@ -1,3 +1,5 @@
+import { registryForPage } from "./games.js";
+
 // The portal, as one self-contained page.
 //
 // Served without a key, because the page itself holds nothing: every number on
@@ -179,8 +181,24 @@ function gate(msg) {
 // one of them.
 const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
 
+// Whether a game name is one the service carries an entry for. A registered
+// game gets a path of its own; anything else - a CI fixture, a game nobody has
+// written an entry for yet - is still readable, just as a query filter.
+function registered(id) {
+  return GAMES.some((g) => g.id === id);
+}
+function entryFor(id) {
+  return GAMES.find((g) => g.id === id) || null;
+}
+
 // state -> address. Innermost first, since each view is the one above it with
 // one more thing chosen.
+//
+// A registered game is a PREFIX and not a parameter: /mining-mike/issues is
+// the thing somebody pastes into a chat, and it survives being read aloud and
+// retyped in a way that ?game=mining-mike does not. An unregistered game keeps
+// the query form, because inventing a path for a game the service knows
+// nothing about would mean the router could not tell it from a typo.
 function href(s) {
   const seg = encodeURIComponent;
   let path;
@@ -192,6 +210,7 @@ function href(s) {
   } else if (s.signature) path = "/issues/" + seg(s.signature);
   else if (s.view === "reports") path = "/reports";
   else path = "/issues";
+  if (s.game && registered(s.game)) return "/" + seg(s.game) + path;
   return path + (s.game ? "?game=" + seg(s.game) : "");
 }
 
@@ -217,6 +236,13 @@ function readUrl() {
     game: new URLSearchParams(location.search).get("game") || "",
     signature: "", report: null, session: "", mode: "",
   };
+  // A leading segment naming a registered game is the game, and the rest of
+  // the path is read exactly as it would be without it. One shift, and every
+  // view below is scoped for free.
+  if (parts.length && registered(parts[0])) {
+    next.game = parts[0];
+    parts = parts.slice(1);
+  }
   if (parts[0] === "reports") {
     next.view = "reports";
     if (parts[1]) next.report = parts[1];
@@ -313,7 +339,7 @@ function toolbar() {
     nav("Issues", { view: "signatures" }, state.view === "signatures" || !!state.signature) +
     nav("All reports", { view: "reports" }, onReports || !!state.report) +
     nav("Sessions", { view: "runs" }, state.view === "runs") +
-    '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
+    gamePicker() +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
     '<button id="share" title="Copy the address of what is on screen">Copy link</button>' +
@@ -330,6 +356,26 @@ function toolbar() {
     view: state.signature ? "signatures" : state.view,
     game: g.value.trim(), signature: "", report: null, session: "", mode: "",
   }));
+}
+
+// The registry, as the thing you choose a game from. A list rather than a text
+// box because the service now knows what it carries: typing "mining mike" and
+// getting an empty portal was a thing the old filter let you do.
+//
+// A game with reports but no entry keeps its place in the list rather than
+// disappearing, since it is still readable and the point of showing it is that
+// somebody may want to write it an entry.
+function gamePicker() {
+  const options = ['<option value="">all games</option>'];
+  for (const g of GAMES) {
+    options.push('<option value="' + esc(g.id) + '"' +
+      (state.game === g.id ? " selected" : "") + '>' + esc(g.title) + '</option>');
+  }
+  if (state.game && !registered(state.game)) {
+    options.push('<option value="' + esc(state.game) + '" selected>' +
+      esc(state.game) + ' (no entry)</option>');
+  }
+  return '<select id="game" title="Which game">' + options.join("") + '</select>';
 }
 
 // Seconds as something a person reads. Runs are minutes, not hours.
@@ -654,9 +700,13 @@ async function viewOneSession() {
     const m = Math.floor(v.length / 2);
     return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
   };
-  // Ten waves to a campaign depth. An endless mode has no contract length, so
-  // its bars scale to the furthest reached instead - see below.
-  const WAVES_PER_DEPTH = 10;
+  // How much of a depth counts as finishing it, from THE GAME'S OWN ENTRY
+  // rather than from a constant in here. Ten is Mining Mike's number, not this
+  // service's, and the next game's will be a different one or none at all.
+  // Without an entry there is no known whole, so every row is scaled the way
+  // an endless mode is: against the furthest anybody reached.
+  const place = (entryFor(state.game) || {}).place || {};
+  const WAVES_PER_DEPTH = Number(place.wavesPerDepth) || 0;
 
   const groups = new Map();
   for (const r of runs) {
@@ -665,7 +715,9 @@ async function viewOneSession() {
     // being filed under "Depth ?", where it was also being measured against
     // ten waves it was never playing for: two runs that reached waves 30 and
     // 22 rendered as a full bar reading "wave 26 / 10".
-    const endless = r.depth == null;
+    // No depth, or a game with no notion of one, means a row that is not on
+    // the ladder and cannot be a share of it.
+    const endless = r.depth == null || !WAVES_PER_DEPTH;
     const sector = r.sector || "";
     const mode = r.mode || "";
     // A key that cannot be forged by a sector name, whatever is in it.
@@ -738,21 +790,63 @@ async function viewOneSession() {
   return crumb + modeBar + bars + table;
 }
 
-// The blocks the mockup showed. Everything here is read out of the context field, so
-// the service never had to learn what a mech is: it stores the JSON, the page
-// knows the shape, and a field the game stops sending simply stops appearing.
-function ctxBlocks(c) {
-  if (!c || typeof c !== "object") return "";
-  const has = (k) => c[k] !== undefined && c[k] !== null && c[k] !== "";
-  const kv = (pairs) => '<dl class="kv">' +
+// The context blocks, drawn from the GAME REGISTRY rather than from a list of
+// field names written into this file.
+//
+// The Session and Machine blocks are here because they are the same two
+// questions for every game: how long was it open, and what was it running on.
+// Everything between them - what a sector is, that a mech has weapons - is one
+// game's vocabulary and lives in src/games.js. That is the whole reason a
+// second game does not need this function edited.
+//
+// The service never had to learn what a mech is either way: it stores the
+// context JSON, the registry says which keys are worth a line, and a field the
+// game stops sending simply stops appearing.
+function reach(c, path) {
+  return String(path).split(".").reduce((v, k) => (v == null ? v : v[k]), c);
+}
+
+function kvRows(pairs) {
+  return '<dl class="kv">' +
     pairs.filter((p) => p[1] !== null && p[1] !== undefined && p[1] !== "")
       .map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + esc(String(p[1])) + '</dd>').join("") +
     '</dl>';
+}
 
+// One registry row to zero or more label/value pairs.
+function rowPairs(c, row) {
+  if (Array.isArray(row)) {
+    const [label, path, format] = row;
+    const v = reach(c, path);
+    if (v === undefined || v === null || v === "") return [];
+    if (format === "mmss") return [[label, mmss(v)]];
+    if (typeof format === "string" && format.includes("/")) {
+      const [yes, no] = format.split("/");
+      return [[label, v ? yes : no]];
+    }
+    return [[label, v]];
+  }
+  // A spread: every key of an object gets its own row, which is how a list of
+  // upgrades nobody enumerated in advance still renders.
+  const obj = reach(c, row.spread);
+  if (!obj || typeof obj !== "object") return [];
+  return Object.entries(obj)
+    .filter(([, v]) => !(row.omitZero && !v))
+    .map(([k, v]) => [k, row.each ? row.each + " " + v : v]);
+}
+
+function ctxBlocks(c, gameId) {
+  if (!c || typeof c !== "object") return "";
+  const has = (k) => {
+    const v = reach(c, k);
+    return v !== undefined && v !== null && v !== "";
+  };
   const blocks = [];
 
+  // Generic, and first: every game has a session and none of them call it
+  // anything else.
   if (has("session_sec") || has("run") || has("run_sec")) {
-    blocks.push(['Session', kv([
+    blocks.push(['Session', kvRows([
       ["app open", has("session_sec") ? mmss(c.session_sec) : null],
       ["in game", has("played_sec") ? mmss(c.played_sec) : null],
       ["run", c.run],
@@ -762,46 +856,17 @@ function ctxBlocks(c) {
     ])]);
   }
 
-  if (has("screen") || has("depth") || has("wave_number")) {
-    blocks.push(['Where', kv([
-      ["screen", c.screen],
-      ["sector", c.sector_title],
-      ["depth", c.depth],
-      // Both numbers, always, and labelled so nobody has to remember which is
-      // which. They are deliberately different and conflating them is the most
-      // repeated bug in this game.
-      ["wave shown", c.wave_number],
-      ["difficulty wave", c.difficulty_wave],
-      ["co-op", c.coop === undefined ? null : (c.coop ? "yes" : "solo")],
-    ])]);
+  // The game's own, in the order its entry lists them.
+  const entry = entryFor(gameId);
+  for (const b of (entry && entry.blocks) || []) {
+    if (b.when && !b.when.some(has)) continue;
+    const pairs = b.rows.flatMap((row) => rowPairs(c, row));
+    if (pairs.length) blocks.push([b.title, kvRows(pairs)]);
   }
 
-  if (c.mech && typeof c.mech === "object") {
-    const m = c.mech;
-    const picks = m.upgrades && typeof m.upgrades === "object"
-      ? Object.entries(m.upgrades).filter(([, v]) => v > 0) : [];
-    const guns = m.weapons && typeof m.weapons === "object" ? Object.entries(m.weapons) : [];
-    blocks.push(['Mech', kv([
-      ["role", m.role],
-      ["level", m.level],
-      ["hp", m.hp],
-      ...picks.map(([k, v]) => [k, v]),
-      ...guns.map(([k, v]) => [k, "tier " + v]),
-    ])]);
-  }
-
-  if (has("kills") || has("credits") || has("prestige")) {
-    blocks.push(['Run', kv([
-      ["kills", c.kills],
-      ["credits", c.credits],
-      ["prestige", c.prestige],
-      ["aliens alive", c.aliens_alive],
-      ["outcome", c.outcome],
-    ])]);
-  }
-
+  // Generic, and last: the machine is the machine.
   if (has("fps") || has("cpu") || has("renderer")) {
-    blocks.push(['Machine', kv([
+    blocks.push(['Machine', kvRows([
       ["fps", c.fps],
       ["cpu", c.cpu],
       ["cores", c.cores],
@@ -823,7 +888,7 @@ async function viewReport(id) {
     parsed = JSON.parse(r.context);
     ctx = JSON.stringify(parsed, null, 2);
   } catch (e) { void e; }
-  const blocks = ctxBlocks(parsed);
+  const blocks = ctxBlocks(parsed, r.game);
   // The way back is read out of the REPORT rather than out of where the click
   // came from, so a link somebody was sent arrives with the same two ways out
   // as one that was clicked into: the issue this is one of, and the session it
@@ -891,6 +956,13 @@ render();
 `;
 
 export function adminPage() {
+  // The registry, handed to the page as data. Its own <script> rather than an
+  // interpolation into the one below, because that one is a String.raw
+  // template and a `${` inside it would be read as a hole rather than as text.
+  //
+  // JSON is not HTML: a "<" inside a string would end this element early, so
+  // the one character that could do it is escaped on the way out.
+  const registry = JSON.stringify(registryForPage()).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -903,6 +975,7 @@ export function adminPage() {
 <body>
 <header><h1>REPORTS</h1><div id="bar" style="display:flex;gap:8px;align-items:center;flex:1;flex-wrap:wrap"></div></header>
 <main id="app"></main>
+<script>const GAMES = ${registry};</script>
 <script>${JS}</script>
 </body>
 </html>`;

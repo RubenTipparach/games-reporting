@@ -183,7 +183,15 @@ test("the portal is served, and holds no data of its own", async () => {
   const html = await res.text();
   assert.ok(html.includes("ADMIN_KEY"), "it asks for the key");
   assert.ok(!html.includes("admin-secret"), "and does not contain it");
-  assert.ok(!html.includes("mining-mike"), "nor any report");
+  // The page DOES carry the game registry, which is configuration and not
+  // data: the list of games this service is set up for, so the picker and the
+  // router can be built without a round trip. What it must still hold none of
+  // is REPORTS - the titles, signatures, sessions and logs that only the read
+  // routes should ever hand out.
+  assert.ok(html.includes("mining-mike"), "it carries the registry");
+  assert.ok(!html.includes(crash.message), "but no report message");
+  assert.ok(!html.includes(crash.session), "no session id");
+  assert.ok(!html.includes("Invalid access"), "nothing out of the table at all");
   assert.match(res.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.equal((await fetch(`${base}/`)).status, 200, "and it is what / serves");
 });

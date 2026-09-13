@@ -375,6 +375,14 @@ export function openDatabase(dataDir) {
         .all(args);
     },
 
+    // Which games have actually posted, and how much. The registry says what
+    // this service KNOWS about; this says what has turned up, and the gap
+    // between the two is the list of games somebody should add an entry for.
+    gameCounts() {
+      const rows = db.prepare("SELECT game, COUNT(*) AS n FROM reports GROUP BY game").all();
+      return Object.fromEntries(rows.map((r) => [r.game, r.n]));
+    },
+
     // Retention. Returns how many went, so the caller can log something true.
     prune(olderThanMs) {
       return stmts.prune.run(olderThanMs).changes;

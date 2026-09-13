@@ -23,6 +23,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
+const { registryForPage, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -515,6 +516,49 @@ test("every view of the portal has an address, and every one of them serves it",
   }
 });
 
+test("a registered game has every page under its own path", async () => {
+  for (const g of REGISTRY) {
+    for (const path of [
+      `/${g.id}`, `/${g.id}/issues`, `/${g.id}/issues/3f9adeadbeef`,
+      `/${g.id}/reports`, `/${g.id}/reports/${id}`,
+      `/${g.id}/sessions`, `/${g.id}/sessions/open-1`, `/${g.id}/sessions/open-1/campaign`,
+    ]) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 200, `${path} should serve the portal`);
+      assert.match(res.headers.get("content-type"), /text\/html/, path);
+    }
+  }
+});
+
+test("a game nobody registered is a 404 rather than an empty portal", async () => {
+  // The failure has to be loud. A link to a game with no entry drawing a
+  // blank page looks exactly like a game with no crashes, and those are
+  // opposite things to learn.
+  for (const path of ["/not-a-game/issues", "/not-a-game", "/test-harness/sessions"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 404, `${path} names no registered game`);
+    assert.match(res.headers.get("content-type"), /application\/json/, path);
+  }
+});
+
+test("the registry is served, with what has actually turned up against it", async () => {
+  const res = await fetch(`${base}/v1/games`);
+  assert.equal(res.status, 200);
+  const { games, unregistered } = await res.json();
+  assert.equal(games.length, REGISTRY.length, "one row per entry");
+  const mike = games.find((g) => g.id === "mining-mike");
+  assert.ok(mike, "the first game is in it");
+  assert.equal(mike.path, "/mining-mike", "carrying the path its pages live under");
+  assert.equal(typeof mike.reports, "number", "and how much it has posted");
+
+  // This file posts under several game names that have no entry. They are
+  // listed rather than hidden, because the list is the answer to "what should
+  // somebody write an entry for next".
+  assert.ok(Array.isArray(unregistered));
+  assert.ok(unregistered.some((u) => u.id === PAGED),
+    "a game with reports and no entry is named, not dropped");
+});
+
 test("an address that is not one of them is still a JSON 404", async () => {
   for (const path of ["/nonsense", "/issues/a/b", "/reports/one/two", "/sessions/a/b/c/d"]) {
     const res = await fetch(`${base}${path}`);
@@ -533,7 +577,10 @@ test("an address that is not one of them is still a JSON 404", async () => {
 // shared link is those two agreeing, so they are worth running rather than
 // reading.
 function router(pathname, search = "") {
-  const src = adminPage().match(/<script>([\s\S]*?)<\/script>/)[1];
+  // The page ships two scripts: the registry, then the code that draws with
+  // it. Take the LAST, and hand it the registry the way the browser would.
+  const scripts = [...adminPage().matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  const src = scripts[scripts.length - 1];
   const el = () => ({
     innerHTML: "", style: {}, setAttribute() {}, select() {}, remove() {},
     querySelectorAll: () => [],
@@ -545,13 +592,14 @@ function router(pathname, search = "") {
   // stubs - by the time it is waiting, the routing has already happened.
   const load = new Function(
     "document", "location", "history", "sessionStorage", "navigator", "fetch",
-    "addEventListener", "setTimeout",
-    src + "\n;return { state, href, to, readUrl };",
+    "addEventListener", "setTimeout", "GAMES",
+    src + "\n;return { state, href, to, readUrl, GAMES };",
   );
   return load(
     doc, loc, { pushState() {} },
     { getItem: () => "", setItem() {}, removeItem() {} },
     {}, () => new Promise(() => {}), () => {}, () => {},
+    registryForPage(),
   );
 }
 
@@ -588,11 +636,44 @@ test("and the view hands back the address it was opened on", () => {
   }
 });
 
-test("the game filter rides along, so a shared link is filtered as the screen was", () => {
-  const { state, href, to } = router("/sessions", "?game=mining-mike");
-  assert.equal(state.game, "mining-mike");
-  assert.equal(href(state), "/sessions?game=mining-mike");
-  assert.equal(to({ view: "reports", signature: "3f9a" }), "/issues/3f9a?game=mining-mike");
+test("a registered game is a path, so the link says which game out loud", () => {
+  const { state, href, to } = router("/mining-mike/sessions");
+  assert.equal(state.game, "mining-mike", "the leading segment is the game");
+  assert.equal(state.view, "runs", "and the rest of the path is read as it always was");
+  assert.equal(href(state), "/mining-mike/sessions", "round trips");
+  assert.equal(to({ view: "reports", signature: "3f9a" }), "/mining-mike/issues/3f9a",
+    "and it rides along into every view from there");
+});
+
+test("every registered game round trips through its own path", () => {
+  for (const g of REGISTRY) {
+    for (const tail of ["/issues", "/reports", "/sessions"]) {
+      const path = "/" + g.id + tail;
+      const { state, href } = router(path);
+      assert.equal(state.game, g.id, path + " should name " + g.id);
+      assert.equal(href(state), path, path + " should round trip");
+    }
+  }
+});
+
+test("a game with no entry is still readable, as a filter rather than a path", () => {
+  // Ingest takes any `game` string on purpose, so reports arrive from things
+  // nobody has written an entry for. Inventing a path for one would mean the
+  // router could not tell it from a typo, so it keeps the query form.
+  const { state, href } = router("/sessions", "?game=test-harness");
+  assert.equal(state.game, "test-harness");
+  assert.equal(href(state), "/sessions?game=test-harness");
+
+  // And the segment is NOT read as a game, because it is not one.
+  const stray = router("/test-harness/sessions");
+  assert.equal(stray.state.game, "", "an unregistered segment names no game");
+});
+
+test("no game at all is every game, which is the unprefixed path", () => {
+  const { state, href, to } = router("/issues");
+  assert.equal(state.game, "");
+  assert.equal(href(state), "/issues");
+  assert.equal(to({ view: "runs" }), "/sessions", "and stays unprefixed on the way in");
 });
 
 test("a session id that needs escaping still makes an address", () => {

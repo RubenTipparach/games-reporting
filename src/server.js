@@ -6,6 +6,7 @@ import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
 import { adminPage } from "./admin.js";
+import { GAMES, isGameId } from "./games.js";
 
 const store = openDatabase(config.dataDir);
 const idSalt = loadSalt(config.dataDir);
@@ -207,9 +208,22 @@ function requireKey(req, res) {
 //   /reports           /reports/<id>
 //   /sessions          /sessions/<session>      /sessions/<session>/<mode>
 //
+// Each of those can be prefixed with a GAME from the registry, and that prefix
+// is the whole of what makes this service multi-game:
+//
+//   /mining-mike/issues        one game's crashes
+//   /issues                    every game's, which is the same page unfiltered
+//
+// A game is a path segment rather than a query parameter because it is the
+// part somebody pastes into a chat. "Look at mining-mike/issues" survives
+// being read aloud; "issues?game=mining-mike" does not, and drops the filter
+// the first time somebody retypes it from memory.
+//
 // Deliberately not a catch-all. An unknown path stays a JSON 404, because a
 // mistyped API call answering with a page is a far worse afternoon than a
-// mistyped page URL answering with JSON.
+// mistyped page URL answering with JSON - and an UNKNOWN GAME is a 404 too,
+// so a link to a game that was never registered fails loudly here instead of
+// quietly drawing an empty portal.
 const PAGE_ROUTES = [
   /^\/$/,
   /^\/admin$/,
@@ -219,7 +233,19 @@ const PAGE_ROUTES = [
 ];
 
 function isPagePath(path) {
-  return PAGE_ROUTES.some((re) => re.test(path));
+  if (PAGE_ROUTES.some((re) => re.test(path))) return true;
+  // /<game>/... is the same set of pages, scoped to one game.
+  const m = path.match(/^\/([^/]+)(\/.*)?$/);
+  if (!m) return false;
+  let segment;
+  try {
+    segment = decodeURIComponent(m[1]);
+  } catch {
+    return false;
+  }
+  if (!isGameId(segment)) return false;
+  const rest = m[2] || "/";
+  return PAGE_ROUTES.some((re) => re.test(rest));
 }
 
 // The cursor a caller hands back to get the next page: the sort key of the
@@ -241,6 +267,29 @@ function handleRequest(req, res, url) {
 
   if (req.method === "GET" && path === "/healthz") {
     return send(res, 200, { ok: true, reports: store.count() });
+  }
+
+  // The registry, as data. A client that wants to know which games this
+  // service carries asks rather than being told out of band, and the portal
+  // builds its game picker from the same list the routes are validated
+  // against. Open, like every other read.
+  if (req.method === "GET" && path === "/v1/games") {
+    if (!requireKey(req, res)) return undefined;
+    const counts = store.gameCounts();
+    return send(res, 200, {
+      games: GAMES.map((g) => ({
+        id: g.id,
+        title: g.title,
+        path: "/" + g.id,
+        reports: counts[g.id] || 0,
+      })),
+      // Games that have posted reports but are not registered. Not an error:
+      // ingest takes any `game` string on purpose, so this is the list of
+      // things somebody may want to add an entry for.
+      unregistered: Object.keys(counts)
+        .filter((id) => !GAMES.some((g) => g.id === id))
+        .map((id) => ({ id, reports: counts[id] })),
+    });
   }
 
   // The portal is a static page that holds no data; everything it draws comes
