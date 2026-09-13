@@ -334,6 +334,30 @@ test("the window comes from config, so it can follow the game's interval", async
   assert.ok(row.live === 0 || row.live === 1);
 });
 
+test("a purchase and a research unlock keep their own kind", async () => {
+  // The game posts these between runs. If the service does not know the kind,
+  // an unknown one is filed as an error and every shop visit becomes a fake
+  // crash in the issue list.
+  const post = (body) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "spend-fixture", ...body }),
+  });
+  await post({ kind: "purchase", message: "bought repair_kit for 120 credits",
+    context: { item: "repair_kit", cost: 120, currency: "credits" } });
+  await post({ kind: "research", message: "unlocked chain_damage",
+    context: { node: "chain_damage", cost: 40 } });
+
+  const { reports } = await fetch(`${base}/v1/reports?game=spend-fixture&limit=50`)
+    .then((r) => r.json());
+  assert.deepEqual(reports.map((r) => r.kind).sort(), ["purchase", "research"],
+    "both kept the kind they were sent as");
+
+  // And neither shows up as something that went wrong.
+  const { signatures } = await fetch(`${base}/v1/signatures?game=spend-fixture`)
+    .then((r) => r.json());
+  assert.equal(signatures.length, 0, "a spend is not a fault and is not an issue");
+});
+
 // ---------------------------------------------------------------------------
 // What players built.
 //

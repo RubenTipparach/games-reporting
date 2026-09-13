@@ -140,6 +140,13 @@ curl -X POST https://games-reporting.fly.dev/v1/reports \
   }'
 ```
 
+`kind` is one of `crash`, `error`, `warning` (the faults), `run` and `session`
+(a depth ending and the five minute check-in), or `purchase` and `research`
+(the two spends, which happen between runs and so ride on neither). Anything
+else is filed as an `error` rather than refused, which is why a kind the game
+starts sending has to be added to `KINDS` before it ships: an unlisted kind
+does not go missing, it goes into the issue list.
+
 `game` is required, and so is at least one of `message` or `stack`. Everything
 else is optional. The reply is `{"id": ..., "signature": ...}`. Send
 `x-api-key` when the client has a token and leave the header off when it does

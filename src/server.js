@@ -23,7 +23,18 @@ export const FAULT_KINDS = ["crash", "error", "warning"];
 // process is leaving) and a crash reports on the next launch, so without this
 // "how long do people play" is answerable only for the sessions that crashed,
 // which is the worst possible sample to draw it from.
-export const KINDS = [...FAULT_KINDS, "run", "session"];
+//
+// "purchase" and "research" are the two spends: something bought from the
+// store, and a research node unlocked. Both happen BETWEEN runs, which is why
+// neither rides on a run summary - there is no run open to hang them on.
+//
+// Every one of these has to be listed, and listing them is not a formality.
+// An unknown kind is filed as an error on purpose (a report that arrives is
+// worth more than a taxonomy), so a kind the game starts sending before this
+// line learns about it does not go missing - it goes into the ISSUE LIST, and
+// a steady drip of successful purchases arriving as errors buries the real
+// ones. Adding a kind here is the difference.
+export const KINDS = [...FAULT_KINDS, "run", "session", "purchase", "research"];
 
 function keyMatches(given, expected) {
   if (!expected) return false;
