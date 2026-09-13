@@ -1,3 +1,5 @@
+import { registryForPage } from "./games.js";
+
 // The portal, as one self-contained page.
 //
 // Served without a key, because the page itself holds nothing: every number on
@@ -109,6 +111,60 @@ pre {
 .err { color: var(--crash); }
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
 .more { display: flex; gap: 10px; align-items: center; margin: 14px 0 0; }
+/* The upgrade tally. One row per upgrade: its art, what the game calls it, a
+   stacked bar whose LENGTH is how many runs took it and whose segments are how
+   those runs ended, and the counts. The row is a hit target as well as a line:
+   hovering it says what taking the thing actually does. */
+.up-row { position: relative; display: grid; gap: 12px; align-items: center;
+          grid-template-columns: 190px 1fr auto;
+          padding: 3px 6px; margin: 0 -6px; border-radius: 6px; }
+.up-art .up-row { grid-template-columns: 32px 190px 1fr auto; }
+.up-row:hover, .up-row:focus-within { background: #1b212a; outline: none; }
+.up-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-icon { width: 32px; height: 32px; display: block; }
+/* An upgrade the game has no art for. It draws a lettered tile in-game for
+   these too, so this is not the page inventing a hole - it is the same hole. */
+.up-tile { width: 32px; height: 32px; display: grid; place-items: center;
+           border: 1px solid var(--line); border-radius: 6px; background: #10151c;
+           color: var(--dim); font-size: 13px; }
+.up-track { display: flex; height: 17px; background: #10151c; border: 1px solid var(--line);
+            border-radius: 2px; overflow: hidden; }
+/* A 2px gap of surface between segments. Succeeded and failed are only dE 7.2
+   apart under deuteranopia, so the boundary cannot be carried by hue alone -
+   the gap, the counts printed beside the bar and the legend all restate it. */
+.up-seg + .up-seg { margin-left: 2px; }
+.up-seg-succeeded { background: #6fd08c; }
+.up-seg-failed    { background: var(--crash); }
+.up-seg-died      { background: #a83a32; }
+.up-seg-quit      { background: var(--warn); }
+.up-tail { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The hover card. CSS and not a mousemove handler because the page redraws
+   itself by replacing innerHTML, and anything that had to be re-bound after a
+   redraw would be re-bound wrongly exactly once. The row is also focusable, so
+   the card is reachable by tab as well as by pointer. */
+.up-tip { position: absolute; z-index: 20; left: 0; top: calc(100% - 2px);
+          display: none; width: 340px; max-width: 90vw; padding: 12px 14px;
+          background: #0b0e12; border: 1px solid var(--accent); border-radius: 8px;
+          box-shadow: 0 12px 34px rgba(0, 0, 0, .6); cursor: default; }
+.up-row:hover .up-tip, .up-row:focus-within .up-tip { display: block; }
+/* Rows near the bottom open upwards, so the last one in a long tally does not
+   hang the card off the end of the document. */
+.up-tip.above { top: auto; bottom: calc(100% - 2px); }
+.up-tip h3 { font-size: 14px; margin: 0; color: var(--text); text-transform: none; letter-spacing: 0; }
+.up-tip-head { display: flex; gap: 12px; align-items: center; }
+.up-tip-head img { width: 48px; height: 48px; }
+.up-tip-head .up-tile { width: 48px; height: 48px; font-size: 18px; }
+.up-tip-eff { margin: 10px 0 0; }
+.up-tip-eff b { color: var(--accent); font-weight: 600; }
+.up-stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+            margin: 10px 0 0; font-variant-numeric: tabular-nums; }
+.up-stats dt { color: var(--dim); }
+.up-stats dd { margin: 0; display: flex; align-items: center; gap: 7px; }
+.up-stats i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
+.legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.never { margin-top: 14px; }
 `;
 
 // Kept as a plain function so the page is one file. It is only ever inserted
@@ -177,14 +233,35 @@ function gate(msg) {
 // 'session' and 'mode' are the two drill-down steps. Empty means "not drilled
 // in yet", so the same view renders all three levels and a crumb just clears
 // one of them.
-const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
+const state = {
+  view: "signatures", game: "", signature: "", report: null, session: "", mode: "",
+  // Which sector the upgrade tally is narrowed to. Empty is all of them.
+  sector: "",
+};
+
+// Whether a game name is one the service carries an entry for. A registered
+// game gets a path of its own; anything else - a CI fixture, a game nobody has
+// written an entry for yet - is still readable, just as a query filter.
+function registered(id) {
+  return GAMES.some((g) => g.id === id);
+}
+function entryFor(id) {
+  return GAMES.find((g) => g.id === id) || null;
+}
 
 // state -> address. Innermost first, since each view is the one above it with
 // one more thing chosen.
+//
+// A registered game is a PREFIX and not a parameter: /mining-mike/issues is
+// the thing somebody pastes into a chat, and it survives being read aloud and
+// retyped in a way that ?game=mining-mike does not. An unregistered game keeps
+// the query form, because inventing a path for a game the service knows
+// nothing about would mean the router could not tell it from a typo.
 function href(s) {
   const seg = encodeURIComponent;
   let path;
   if (s.report) path = "/reports/" + seg(s.report);
+  else if (s.view === "upgrades") path = "/upgrades";
   else if (s.view === "runs") {
     path = "/sessions" +
       (s.session ? "/" + seg(s.session) : "") +
@@ -192,7 +269,14 @@ function href(s) {
   } else if (s.signature) path = "/issues/" + seg(s.signature);
   else if (s.view === "reports") path = "/reports";
   else path = "/issues";
-  return path + (s.game ? "?game=" + seg(s.game) : "");
+  // The sector narrows the tally, and it is a filter rather than a place, so
+  // it stays a query. A link to it still opens on the same screenful.
+  const query = new URLSearchParams();
+  if (s.game && !registered(s.game)) query.set("game", s.game);
+  if (s.view === "upgrades" && s.sector) query.set("sector", s.sector);
+  const tail = query.toString() ? "?" + query.toString() : "";
+  if (s.game && registered(s.game)) return "/" + seg(s.game) + path + tail;
+  return path + tail;
 }
 
 // A link to one view, from where we are now. The game filter rides along
@@ -200,7 +284,7 @@ function href(s) {
 // up reading another game's reports without noticing.
 function to(patch) {
   return href(Object.assign(
-    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "" },
+    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "", sector: "" },
     patch));
 }
 
@@ -212,11 +296,20 @@ function readUrl() {
   try {
     parts = location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
   } catch (e) { void e; } // a hand-mangled %-escape just lands on the default view
+  const params = new URLSearchParams(location.search);
   const next = {
     view: "signatures",
-    game: new URLSearchParams(location.search).get("game") || "",
+    game: params.get("game") || "",
     signature: "", report: null, session: "", mode: "",
+    sector: params.get("sector") || "",
   };
+  // A leading segment naming a registered game is the game, and the rest of
+  // the path is read exactly as it would be without it. One shift, and every
+  // view below is scoped for free.
+  if (parts.length && registered(parts[0])) {
+    next.game = parts[0];
+    parts = parts.slice(1);
+  }
   if (parts[0] === "reports") {
     next.view = "reports";
     if (parts[1]) next.report = parts[1];
@@ -226,6 +319,8 @@ function readUrl() {
     // A mode with no session to hang it on is not a view; it would render the
     // whole session list under a filter nothing shows.
     next.mode = next.session ? (parts[2] || "") : "";
+  } else if (parts[0] === "upgrades") {
+    next.view = "upgrades";
   } else if (parts[0] === "issues" && parts[1]) {
     next.view = "reports";
     next.signature = parts[1];
@@ -268,6 +363,7 @@ addEventListener("popstate", () => { readUrl(); render(); });
 function pageTitle() {
   const short = (v) => String(v).slice(0, 12);
   if (state.report) return "Report " + short(state.report);
+  if (state.view === "upgrades") return "Upgrades";
   if (state.view === "runs") return state.session ? "Session " + short(state.session) : "Sessions";
   if (state.signature) return "Issue " + short(state.signature);
   if (state.view === "reports") return "Reports";
@@ -313,7 +409,10 @@ function toolbar() {
     nav("Issues", { view: "signatures" }, state.view === "signatures" || !!state.signature) +
     nav("All reports", { view: "reports" }, onReports || !!state.report) +
     nav("Sessions", { view: "runs" }, state.view === "runs") +
-    '<input id="game" placeholder="filter by game" value="' + esc(state.game) + '" size="16">' +
+    // Only for a game whose entry names an upgrades path: a tab that opens on
+    // "this game has no upgrades" is a tab nobody should have been offered.
+    (hasUpgrades() ? nav("Upgrades", { view: "upgrades" }, state.view === "upgrades") : "") +
+    gamePicker() +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
     '<button id="share" title="Copy the address of what is on screen">Copy link</button>' +
@@ -330,6 +429,33 @@ function toolbar() {
     view: state.signature ? "signatures" : state.view,
     game: g.value.trim(), signature: "", report: null, session: "", mode: "",
   }));
+}
+
+// The registry, as the thing you choose a game from. A list rather than a text
+// box because the service now knows what it carries: typing "mining mike" and
+// getting an empty portal was a thing the old filter let you do.
+//
+// A game with reports but no entry keeps its place in the list rather than
+// disappearing, since it is still readable and the point of showing it is that
+// somebody may want to write it an entry.
+// Whether the chosen game has a build worth tallying. With no game chosen the
+// tally has no single path to read, so the tab waits until one is.
+function hasUpgrades() {
+  const e = entryFor(state.game);
+  return !!(e && e.upgrades && e.upgrades.path);
+}
+
+function gamePicker() {
+  const options = ['<option value="">all games</option>'];
+  for (const g of GAMES) {
+    options.push('<option value="' + esc(g.id) + '"' +
+      (state.game === g.id ? " selected" : "") + '>' + esc(g.title) + '</option>');
+  }
+  if (state.game && !registered(state.game)) {
+    options.push('<option value="' + esc(state.game) + '" selected>' +
+      esc(state.game) + ' (no entry)</option>');
+  }
+  return '<select id="game" title="Which game">' + options.join("") + '</select>';
 }
 
 // Seconds as something a person reads. Runs are minutes, not hours.
@@ -425,6 +551,202 @@ async function loadMore(btn) {
     btn.remove();
   }
   countShown();
+}
+
+// ---------------------------------------------------------------------------
+// WHAT PLAYERS BUILT.
+//
+// One row per upgrade. The bar's LENGTH is how many runs took it, so the list
+// reads top to bottom as most-taken first; its SEGMENTS are how those runs
+// ended, so a long bar that is mostly red is a popular pick that is not
+// working. Both questions at once, which is the point: either alone is a
+// number somebody has to hold in their head while they read the other.
+//
+// Scaled against the most-taken upgrade rather than against the run count,
+// because the question is which picks beat which other picks. Against the run
+// total every bar would be short and the comparison would be between slivers.
+//
+// The outcome colours are the portal's status colours, and succeeded/failed
+// are only dE 7.2 apart under deuteranopia - inside the band that is legal
+// ONLY with a second encoding. So the counts are printed beside every bar, the
+// segments are separated by 2px of surface, and the legend names each colour.
+// Nobody has to tell green from red to read this.
+const OUTCOMES = ["succeeded", "failed", "died", "quit"];
+
+function upgradeLegend() {
+  return '<p class="legend">' + OUTCOMES.map((o) =>
+    '<span><i class="up-seg-' + o + '"></i>' + esc(o) + '</span>').join("") + '</p>';
+}
+
+// An effect is a sentence and its numbers, kept apart in the registry so the
+// numbers can be worked out FOR A LEVEL rather than baked in at one of them.
+// {0} is the first pair and a pair is [per level, flat], so [25, 0] at level 3
+// is 75. A pair and not a function because the registry arrives here as JSON.
+function effectAt(effect, level) {
+  if (!effect || !effect.length) return "";
+  const args = effect.slice(1);
+  return String(effect[0]).replace(/\{(\d+)\}/g, (slot, i) => {
+    const pair = args[Number(i)];
+    return pair ? String(level * pair[0] + pair[1]) : slot;
+  });
+}
+
+// What the page knows about one upgrade beyond its key: whatever this game's
+// entry says, and nothing at all if the entry says nothing. Everything below
+// degrades to the bare key, so a game that has written no vocabulary yet gets
+// the same page with fewer words on it.
+function upgradeMeta(upgrades, key) {
+  return (upgrades && upgrades.meta && upgrades.meta[key]) || null;
+}
+
+function upgradeName(upgrades, key) {
+  const m = upgradeMeta(upgrades, key);
+  return (m && m.name) || key;
+}
+
+// The art, or the lettered tile standing in for art the game does not have.
+// Missing art is a fact about the game and not an error, so it is drawn rather
+// than left as a broken image: the game itself draws a lettered card for these.
+function upgradeArt(upgrades, key) {
+  const m = upgradeMeta(upgrades, key);
+  if (m && m.icon && upgrades.icons) {
+    return '<img class="up-icon" alt="" width="32" height="32" src="' +
+      esc(upgrades.icons + "/" + key + ".png") + '">';
+  }
+  return '<span class="up-tile" aria-hidden="true">' +
+    esc(upgradeName(upgrades, key).slice(0, 1).toUpperCase()) + '</span>';
+}
+
+// The hover card: what this upgrade is, what taking it does at the level
+// people actually reach and at its ceiling, and how the runs that took it
+// ended. The bar says how OFTEN and how it WENT; this says what it IS, which
+// is the question a bar cannot answer and the one everybody asks first.
+function upgradeTip(u, upgrades, above) {
+  const m = upgradeMeta(upgrades, u.upgrade);
+  const unit = upgrades.unit || "lvl";
+  const lv = median(u.levels);
+  const lo = u.levels.length ? Math.min.apply(null, u.levels) : lv;
+  const hi = u.levels.length ? Math.max.apply(null, u.levels) : lv;
+  // The same denominator rule the tally follows. One run that cleared is one
+  // run and not a 100% clear rate, so nothing here is a share until three.
+  const share = (n) => u.runs >= 3
+    ? ' <span class="dim">' + Math.round(n / u.runs * 100) + '%</span>' : '';
+  // An outcome nobody hit is left out, EXCEPT a clear: "succeeded 0" is the
+  // most useful line this card has and it cannot be one that only appears
+  // when the news is good.
+  const line = (o) => (u[o] || o === "succeeded")
+    ? '<dt>' + esc(o) + '</dt><dd><i class="up-seg-' + o + '"></i>' + u[o] + share(u[o]) + '</dd>'
+    : '';
+  const eff = m && m.effect
+    ? '<p class="up-tip-eff"><b>' + esc(unit) + ' ' + lv + '</b>' +
+        (m.max ? ' <span class="dim">of ' + m.max + '</span>' : '') +
+        ' &middot; ' + esc(effectAt(m.effect, lv)) + '</p>' +
+      (m.max && lv < m.max
+        ? '<p class="up-tip-eff dim">' + esc(unit) + ' ' + m.max + ' &middot; ' +
+          esc(effectAt(m.effect, m.max)) + '</p>'
+        : '')
+    : '';
+  return '<div class="up-tip' + (above ? " above" : "") + '" role="tooltip">' +
+    '<div class="up-tip-head">' + upgradeArt(upgrades, u.upgrade) +
+      '<div><h3>' + esc(upgradeName(upgrades, u.upgrade)) + '</h3>' +
+      (m && m.name ? '<span class="dim">' + esc(u.upgrade) + '</span>' : '') +
+      '</div></div>' + eff +
+    '<dl class="up-stats">' +
+      '<dt>runs</dt><dd>' + u.runs + '</dd>' +
+      '<dt>' + esc(unit) + ' reached</dt><dd>' +
+        (lo === hi ? lo : lo + ' to ' + hi) +
+        ' <span class="dim">typically ' + lv + '</span></dd>' +
+      OUTCOMES.map(line).join("") +
+    '</dl></div>';
+}
+
+async function viewUpgrades() {
+  const q = new URLSearchParams();
+  if (state.game) q.set("game", state.game);
+  if (state.sector) q.set("sector", state.sector);
+  const body = await api("/v1/upgrades?" + q.toString());
+
+  if (!body.upgrades) {
+    return '<div class="empty">This game has no upgrades in its registry entry.' +
+      '<br><span class="dim">Add an <code>upgrades</code> path to its entry in src/games.js ' +
+      'and this page draws itself.</span></div>';
+  }
+  if (!body.runs) {
+    return sectorChips(body.sectors) +
+      '<div class="empty">No finished run has carried a build yet.' +
+      '<br><span class="dim">The tally is over run summaries, so it fills in as runs end.</span></div>';
+  }
+
+  const most = Math.max(1, ...body.taken.map((u) => u.runs));
+  // A game whose entry names its upgrades gets a column of art; one that does
+  // not gets the same rows, one column narrower. Neither is a branch on WHICH
+  // game it is - it is a branch on how much the entry has to say.
+  const named = !!body.upgrades.meta;
+  const rows = body.taken.map((u, i) => {
+    const cleared = u.succeeded;
+    // A share needs a denominator worth dividing by. One run that cleared is
+    // not a 100% clear rate, it is one run, and printing the percentage is how
+    // a page invents a finding out of a single player's afternoon.
+    const pct = u.runs >= 3 ? Math.round((cleared / u.runs) * 100) : null;
+    const seg = (o) => u[o]
+      ? '<span class="up-seg up-seg-' + o + '" style="width:' +
+        (u[o] / most * 100) + '%"></span>'
+      : "";
+    // Far enough down the list that a card opening downwards would hang off
+    // the end of it, and far enough from the top that opening upwards has
+    // somewhere to open into.
+    const above = i >= 4 && i >= body.taken.length - 3;
+    return '<div class="up-row" tabindex="0">' +
+      (named ? upgradeArt(body.upgrades, u.upgrade) : "") +
+      '<span class="up-name">' + esc(upgradeName(body.upgrades, u.upgrade)) + '</span>' +
+      '<span class="up-track">' + OUTCOMES.map(seg).join("") + '</span>' +
+      '<span class="up-tail dim">' + u.runs + ' run' + (u.runs === 1 ? "" : "s") +
+        ' &middot; <span class="' + (cleared ? "outcome-succeeded" : "dim") + '">' +
+        cleared + ' cleared</span>' +
+        (pct === null ? '' : ' <span class="dim">' + pct + '%</span>') +
+        ' &middot; ' + esc(body.upgrades.unit || "lvl") + ' ' + median(u.levels) +
+      '</span>' +
+      upgradeTip(u, body.upgrades, above) +
+      '</div>';
+  }).join("");
+
+  const never = body.never.length
+    ? '<div class="card never"><h2>Never taken</h2>' +
+      '<p class="dim">Present in the build every run reports, and picked in none of them. ' +
+      'The loudest thing this page has to say, and invisible if it only listed what was.</p>' +
+      '<p>' + body.never.map((n) =>
+        '<span class="dim" title="' + esc(n) + '">' +
+        esc(upgradeName(body.upgrades, n)) + '</span>').join(" &middot; ") +
+      '</p></div>'
+    : "";
+
+  return sectorChips(body.sectors) +
+    '<div class="card"><h2>' + esc(body.upgrades.title || "Upgrades") +
+      ' <span class="dim">across ' + body.runs + ' run' + (body.runs === 1 ? "" : "s") +
+      (state.sector ? ' in ' + esc(state.sector) : '') + '</span></h2>' +
+    upgradeLegend() +
+    '<div class="up-list' + (named ? " up-art" : "") + '">' + rows + '</div>' +
+    '</div>' + never;
+}
+
+// The sectors runs happened in, as filters. Same idiom as the mode chips on a
+// session, and only drawn when there is a choice to make.
+function sectorChips(sectors) {
+  if (!sectors || sectors.length < 2) return "";
+  const chip = (label, sector, on) =>
+    '<a class="btn mode' + (on ? " on" : "") + '" href="' +
+    esc(to({ view: "upgrades", sector })) + '">' + esc(label) + '</a>';
+  return '<p class="dim">Sector: ' + chip("all", "", !state.sector) + " " +
+    sectors.map((s) => chip(s, s, state.sector === s)).join(" ") + '</p>';
+}
+
+// The middle of a handful of runs, which is what the tally hands back a list
+// for: an average is dragged around by one player who took a thing to five.
+function median(xs) {
+  const v = [...xs].sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
 }
 
 async function viewSignatures() {
@@ -654,9 +976,13 @@ async function viewOneSession() {
     const m = Math.floor(v.length / 2);
     return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
   };
-  // Ten waves to a campaign depth. An endless mode has no contract length, so
-  // its bars scale to the furthest reached instead - see below.
-  const WAVES_PER_DEPTH = 10;
+  // How much of a depth counts as finishing it, from THE GAME'S OWN ENTRY
+  // rather than from a constant in here. Ten is Mining Mike's number, not this
+  // service's, and the next game's will be a different one or none at all.
+  // Without an entry there is no known whole, so every row is scaled the way
+  // an endless mode is: against the furthest anybody reached.
+  const place = (entryFor(state.game) || {}).place || {};
+  const WAVES_PER_DEPTH = Number(place.wavesPerDepth) || 0;
 
   const groups = new Map();
   for (const r of runs) {
@@ -665,7 +991,9 @@ async function viewOneSession() {
     // being filed under "Depth ?", where it was also being measured against
     // ten waves it was never playing for: two runs that reached waves 30 and
     // 22 rendered as a full bar reading "wave 26 / 10".
-    const endless = r.depth == null;
+    // No depth, or a game with no notion of one, means a row that is not on
+    // the ladder and cannot be a share of it.
+    const endless = r.depth == null || !WAVES_PER_DEPTH;
     const sector = r.sector || "";
     const mode = r.mode || "";
     // A key that cannot be forged by a sector name, whatever is in it.
@@ -738,21 +1066,63 @@ async function viewOneSession() {
   return crumb + modeBar + bars + table;
 }
 
-// The blocks the mockup showed. Everything here is read out of the context field, so
-// the service never had to learn what a mech is: it stores the JSON, the page
-// knows the shape, and a field the game stops sending simply stops appearing.
-function ctxBlocks(c) {
-  if (!c || typeof c !== "object") return "";
-  const has = (k) => c[k] !== undefined && c[k] !== null && c[k] !== "";
-  const kv = (pairs) => '<dl class="kv">' +
+// The context blocks, drawn from the GAME REGISTRY rather than from a list of
+// field names written into this file.
+//
+// The Session and Machine blocks are here because they are the same two
+// questions for every game: how long was it open, and what was it running on.
+// Everything between them - what a sector is, that a mech has weapons - is one
+// game's vocabulary and lives in src/games.js. That is the whole reason a
+// second game does not need this function edited.
+//
+// The service never had to learn what a mech is either way: it stores the
+// context JSON, the registry says which keys are worth a line, and a field the
+// game stops sending simply stops appearing.
+function reach(c, path) {
+  return String(path).split(".").reduce((v, k) => (v == null ? v : v[k]), c);
+}
+
+function kvRows(pairs) {
+  return '<dl class="kv">' +
     pairs.filter((p) => p[1] !== null && p[1] !== undefined && p[1] !== "")
       .map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + esc(String(p[1])) + '</dd>').join("") +
     '</dl>';
+}
 
+// One registry row to zero or more label/value pairs.
+function rowPairs(c, row) {
+  if (Array.isArray(row)) {
+    const [label, path, format] = row;
+    const v = reach(c, path);
+    if (v === undefined || v === null || v === "") return [];
+    if (format === "mmss") return [[label, mmss(v)]];
+    if (typeof format === "string" && format.includes("/")) {
+      const [yes, no] = format.split("/");
+      return [[label, v ? yes : no]];
+    }
+    return [[label, v]];
+  }
+  // A spread: every key of an object gets its own row, which is how a list of
+  // upgrades nobody enumerated in advance still renders.
+  const obj = reach(c, row.spread);
+  if (!obj || typeof obj !== "object") return [];
+  return Object.entries(obj)
+    .filter(([, v]) => !(row.omitZero && !v))
+    .map(([k, v]) => [k, row.each ? row.each + " " + v : v]);
+}
+
+function ctxBlocks(c, gameId) {
+  if (!c || typeof c !== "object") return "";
+  const has = (k) => {
+    const v = reach(c, k);
+    return v !== undefined && v !== null && v !== "";
+  };
   const blocks = [];
 
+  // Generic, and first: every game has a session and none of them call it
+  // anything else.
   if (has("session_sec") || has("run") || has("run_sec")) {
-    blocks.push(['Session', kv([
+    blocks.push(['Session', kvRows([
       ["app open", has("session_sec") ? mmss(c.session_sec) : null],
       ["in game", has("played_sec") ? mmss(c.played_sec) : null],
       ["run", c.run],
@@ -762,46 +1132,17 @@ function ctxBlocks(c) {
     ])]);
   }
 
-  if (has("screen") || has("depth") || has("wave_number")) {
-    blocks.push(['Where', kv([
-      ["screen", c.screen],
-      ["sector", c.sector_title],
-      ["depth", c.depth],
-      // Both numbers, always, and labelled so nobody has to remember which is
-      // which. They are deliberately different and conflating them is the most
-      // repeated bug in this game.
-      ["wave shown", c.wave_number],
-      ["difficulty wave", c.difficulty_wave],
-      ["co-op", c.coop === undefined ? null : (c.coop ? "yes" : "solo")],
-    ])]);
+  // The game's own, in the order its entry lists them.
+  const entry = entryFor(gameId);
+  for (const b of (entry && entry.blocks) || []) {
+    if (b.when && !b.when.some(has)) continue;
+    const pairs = b.rows.flatMap((row) => rowPairs(c, row));
+    if (pairs.length) blocks.push([b.title, kvRows(pairs)]);
   }
 
-  if (c.mech && typeof c.mech === "object") {
-    const m = c.mech;
-    const picks = m.upgrades && typeof m.upgrades === "object"
-      ? Object.entries(m.upgrades).filter(([, v]) => v > 0) : [];
-    const guns = m.weapons && typeof m.weapons === "object" ? Object.entries(m.weapons) : [];
-    blocks.push(['Mech', kv([
-      ["role", m.role],
-      ["level", m.level],
-      ["hp", m.hp],
-      ...picks.map(([k, v]) => [k, v]),
-      ...guns.map(([k, v]) => [k, "tier " + v]),
-    ])]);
-  }
-
-  if (has("kills") || has("credits") || has("prestige")) {
-    blocks.push(['Run', kv([
-      ["kills", c.kills],
-      ["credits", c.credits],
-      ["prestige", c.prestige],
-      ["aliens alive", c.aliens_alive],
-      ["outcome", c.outcome],
-    ])]);
-  }
-
+  // Generic, and last: the machine is the machine.
   if (has("fps") || has("cpu") || has("renderer")) {
-    blocks.push(['Machine', kv([
+    blocks.push(['Machine', kvRows([
       ["fps", c.fps],
       ["cpu", c.cpu],
       ["cores", c.cores],
@@ -823,7 +1164,7 @@ async function viewReport(id) {
     parsed = JSON.parse(r.context);
     ctx = JSON.stringify(parsed, null, 2);
   } catch (e) { void e; }
-  const blocks = ctxBlocks(parsed);
+  const blocks = ctxBlocks(parsed, r.game);
   // The way back is read out of the REPORT rather than out of where the click
   // came from, so a link somebody was sent arrives with the same two ways out
   // as one that was clicked into: the issue this is one of, and the session it
@@ -869,6 +1210,7 @@ async function render() {
   app.innerHTML = '<div class="empty">Loading...</div>';
   try {
     if (state.report) app.innerHTML = await viewReport(state.report);
+    else if (state.view === "upgrades") app.innerHTML = await viewUpgrades();
     else if (state.view === "runs") app.innerHTML = await viewRuns();
     else if (state.view === "reports" || state.signature) app.innerHTML = await viewReports();
     else app.innerHTML = await viewSignatures();
@@ -891,6 +1233,13 @@ render();
 `;
 
 export function adminPage() {
+  // The registry, handed to the page as data. Its own <script> rather than an
+  // interpolation into the one below, because that one is a String.raw
+  // template and a `${` inside it would be read as a hole rather than as text.
+  //
+  // JSON is not HTML: a "<" inside a string would end this element early, so
+  // the one character that could do it is escaped on the way out.
+  const registry = JSON.stringify(registryForPage()).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -903,6 +1252,7 @@ export function adminPage() {
 <body>
 <header><h1>REPORTS</h1><div id="bar" style="display:flex;gap:8px;align-items:center;flex:1;flex-wrap:wrap"></div></header>
 <main id="app"></main>
+<script>const GAMES = ${registry};</script>
 <script>${JS}</script>
 </body>
 </html>`;

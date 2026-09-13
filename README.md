@@ -73,21 +73,31 @@ Every view the portal can draw has an address of its own, so "look at this
 crash" is a link rather than a set of directions. Paste one to somebody and it
 opens on the thing you were looking at.
 
+**A game is a path segment**, so a link says which game out loud:
+
 | Address | What it opens on |
 | --- | --- |
-| `/` or `/issues` | The issue rollup, which is the front page, with **Load more** |
-| `/issues/<signature>` | The reports behind one issue |
-| `/reports` | Every report, newest first, with **Load more** |
-| `/reports/<id>` | One report in full, with its stack, context and log |
-| `/sessions` | Every session, with the playtime totals and which are still running |
-| `/sessions/<session>` | One session: its runs and how far they got |
-| `/sessions/<session>/<mode>` | The same, narrowed to campaign or survival |
+| `/mining-mike` or `/mining-mike/issues` | That game's issue rollup, with **Load more** |
+| `/mining-mike/issues/<signature>` | The reports behind one issue |
+| `/mining-mike/reports` | Every report, newest first, with **Load more** |
+| `/mining-mike/reports/<id>` | One report in full, with its stack, context and log |
+| `/mining-mike/sessions` | Every session, with playtime and which are still running |
+| `/mining-mike/sessions/<session>` | One session: its runs and how far they got |
+| `/mining-mike/sessions/<session>/<mode>` | The same, narrowed to campaign or survival |
+| `/mining-mike/upgrades` | What players built, and how those runs ended |
 
-Add `?game=mining-mike` to any of them to filter, which the toolbar's filter box
-does for you and which then rides along as you click deeper. **Copy link** in
-the top right puts the current address on the clipboard; the browser's back and
-forward buttons work, and so do right-click → copy link address and ctrl-click
-to open a row in a new tab.
+Drop the prefix for the same pages across every game: `/issues`, `/reports`,
+`/sessions`. The toolbar's picker switches between them, and whichever you
+choose rides along as you click deeper.
+
+A game with reports but no registry entry is still readable as
+`?game=<id>`, but has no path of its own: `/<unregistered>/issues` is a **404**
+rather than an empty page, because an empty page looks exactly like a game with
+no crashes.
+
+**Copy link** in the top right puts the current address on the clipboard; the
+browser's back and forward buttons work, and so do right-click → copy link
+address and ctrl-click to open a row in a new tab.
 
 A link into a service with `ADMIN_KEY` set asks whoever opened it for the key
 first and then lands on the view it pointed at, so sharing one is not a way
@@ -98,6 +108,8 @@ around the key.
 | Route | Key | What it does |
 | --- | --- | --- |
 | `GET /healthz` | none | Liveness, plus how many reports are held |
+| `GET /v1/games` | admin | The game registry, and what has posted against it |
+| `GET /v1/upgrades` | admin | What players built, tallied by outcome |
 | `POST /v1/reports` | ingest | Take a report |
 | `GET /v1/reports` | admin | List, newest first; paged by cursor |
 | `GET /v1/reports/:id` | admin | One report, in full, with its log |
@@ -127,6 +139,13 @@ curl -X POST https://games-reporting.fly.dev/v1/reports \
     "context": {"sector": 0, "depth": 3, "wave": 21}
   }'
 ```
+
+`kind` is one of `crash`, `error`, `warning` (the faults), `run` and `session`
+(a depth ending and the five minute check-in), or `purchase` and `research`
+(the two spends, which happen between runs and so ride on neither). Anything
+else is filed as an `error` rather than refused, which is why a kind the game
+starts sending has to be added to `KINDS` before it ships: an unlisted kind
+does not go missing, it goes into the issue list.
 
 `game` is required, and so is at least one of `message` or `stack`. Everything
 else is optional. The reply is `{"id": ..., "signature": ...}`. Send
@@ -199,6 +218,65 @@ send both.
 Neither `/v1/sessions` nor `/v1/runs` is paged. A session is a bounded thing
 and a run belongs to one, so once you have opened a session there is nothing
 behind it to page to; both take a `limit` and nothing more.
+
+### More than one game
+
+This service is not Mining Mike's crash collector. It is a crash collector, and
+Mining Mike is the first game in it: **adding a second is one entry in
+`src/games.js`** and nothing else.
+
+Everything generic to a crash report lives outside that file and is never
+branched on a game id: the report's own fields, the signature and its rollup,
+the session model, run outcomes, and the Session and Machine context blocks,
+which ask the same two questions of every game. What lives IN the entry is
+whatever the game calls the places you can be, how much of one counts as
+finishing it, and which of its own context keys are worth a line on screen.
+
+```js
+{
+  id: "mining-mike",
+  title: "Mining Mike",
+  place: { sector: "sector_title", depth: "depth", wavesPerDepth: 10 },
+  blocks: [ { title: "Mech", when: ["mech"], rows: [...] } ],
+}
+```
+
+`GET /v1/games` answers what is registered and what has posted without an
+entry, which is the list of games somebody should write one for. `CLAUDE.md`
+carries the rule and the block grammar.
+
+### A game's upgrade art
+
+`/<game>/upgrades` tallies what players built and how those runs ended. When
+the entry also carries `upgrades.meta`, each row gets the name a player would
+recognise, the game's own icon, and - on hover - what taking the thing does at
+the level people actually reach.
+
+The art is served from `assets/icons/<game>/<key>.png`, one file per upgrade
+key, at `96x96`. It is the only thing this service serves that is not JSON or
+the portal, and it is **open even when `ADMIN_KEY` is set**: an `<img>` cannot
+carry a header, so a key there would mean broken tiles for exactly the person
+who has the key, and there is nothing behind it anyway - it is the same art the
+game ships to anybody who installs it.
+
+Mining Mike's came out of the game's own `resources/sprites/upgrade icons/`,
+resized and reduced to a 128-colour palette (about 3.5 KB each, against 20 KB
+for the originals, and no difference at 2x). The mapping from upgrade key to
+file is the game's `_icon_for()`, applied once on the way in, so the copy here
+is named by key and the page never has to look anything up:
+
+```sh
+python3 -c "
+from PIL import Image
+im = Image.open('.../upgrade icons/vitality.png').convert('RGBA')
+im.resize((96, 96), Image.LANCZOS).quantize(colors=128, method=Image.FASTOCTREE) \
+  .save('assets/icons/mining-mike/max_health.png', optimize=True)"
+```
+
+A test asserts art on disk and art claimed by an entry agree in both
+directions, so a file nobody shows and an `icon: true` with no file are each
+a failure rather than a surprise. An upgrade with no art draws a lettered
+tile, which is what the game draws for it too.
 
 ### Is a session still running?
 
@@ -293,5 +371,6 @@ key, grouping across builds and machines, Steam ids provably absent from the
 stored row, distinct players counted without being named, the portal holding no
 data of its own, the body cap, the rate limit and its refill, the log tail, the
 refusals, every page address round-tripping to the view it names, and the
-cursor recovering every row of a burst that shares timestamps, and a session
-counting as over only once its check-ins have stopped.
+cursor recovering every row of a burst that shares timestamps, a session
+counting as over only once its check-ins have stopped, and every registered
+game round-tripping through a path of its own.

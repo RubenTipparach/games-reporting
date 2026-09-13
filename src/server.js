@@ -1,11 +1,14 @@
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { openDatabase, PAGE, pageLimit } from "./db.js";
 import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
 import { adminPage } from "./admin.js";
+import { GAMES, isGameId, upgradePathFor } from "./games.js";
 
 const store = openDatabase(config.dataDir);
 const idSalt = loadSalt(config.dataDir);
@@ -22,7 +25,18 @@ export const FAULT_KINDS = ["crash", "error", "warning"];
 // process is leaving) and a crash reports on the next launch, so without this
 // "how long do people play" is answerable only for the sessions that crashed,
 // which is the worst possible sample to draw it from.
-export const KINDS = [...FAULT_KINDS, "run", "session"];
+//
+// "purchase" and "research" are the two spends: something bought from the
+// store, and a research node unlocked. Both happen BETWEEN runs, which is why
+// neither rides on a run summary - there is no run open to hang them on.
+//
+// Every one of these has to be listed, and listing them is not a formality.
+// An unknown kind is filed as an error on purpose (a report that arrives is
+// worth more than a taxonomy), so a kind the game starts sending before this
+// line learns about it does not go missing - it goes into the ISSUE LIST, and
+// a steady drip of successful purchases arriving as errors buries the real
+// ones. Adding a kind here is the difference.
+export const KINDS = [...FAULT_KINDS, "run", "session", "purchase", "research"];
 
 function keyMatches(given, expected) {
   if (!expected) return false;
@@ -207,19 +221,45 @@ function requireKey(req, res) {
 //   /reports           /reports/<id>
 //   /sessions          /sessions/<session>      /sessions/<session>/<mode>
 //
+// Each of those can be prefixed with a GAME from the registry, and that prefix
+// is the whole of what makes this service multi-game:
+//
+//   /mining-mike/issues        one game's crashes
+//   /issues                    every game's, which is the same page unfiltered
+//
+// A game is a path segment rather than a query parameter because it is the
+// part somebody pastes into a chat. "Look at mining-mike/issues" survives
+// being read aloud; "issues?game=mining-mike" does not, and drops the filter
+// the first time somebody retypes it from memory.
+//
 // Deliberately not a catch-all. An unknown path stays a JSON 404, because a
 // mistyped API call answering with a page is a far worse afternoon than a
-// mistyped page URL answering with JSON.
+// mistyped page URL answering with JSON - and an UNKNOWN GAME is a 404 too,
+// so a link to a game that was never registered fails loudly here instead of
+// quietly drawing an empty portal.
 const PAGE_ROUTES = [
   /^\/$/,
   /^\/admin$/,
   /^\/issues(?:\/[^/]+)?$/,
   /^\/reports(?:\/[^/]+)?$/,
   /^\/sessions(?:\/[^/]+){0,2}$/,
+  /^\/upgrades$/,
 ];
 
 function isPagePath(path) {
-  return PAGE_ROUTES.some((re) => re.test(path));
+  if (PAGE_ROUTES.some((re) => re.test(path))) return true;
+  // /<game>/... is the same set of pages, scoped to one game.
+  const m = path.match(/^\/([^/]+)(\/.*)?$/);
+  if (!m) return false;
+  let segment;
+  try {
+    segment = decodeURIComponent(m[1]);
+  } catch {
+    return false;
+  }
+  if (!isGameId(segment)) return false;
+  const rest = m[2] || "/";
+  return PAGE_ROUTES.some((re) => re.test(rest));
 }
 
 // The cursor a caller hands back to get the next page: the sort key of the
@@ -236,11 +276,78 @@ function nextCursor(rows, limit, key, id) {
   return { before: last[key], before_id: last[id] };
 }
 
+// Upgrade art: the only bytes this service serves that are not JSON or the
+// page. Which files exist is a game's business and lives in its registry entry
+// (`upgrades.icons` and `icon: true`); what is here is the reading of them,
+// which is the same for every game.
+//
+// OPEN, even when ADMIN_KEY closes the reads. An <img> cannot carry a header,
+// so a key on this route would mean the portal drawing broken tiles at exactly
+// the person who has the key. There is nothing behind it to protect: it is the
+// same art the game hands to anybody who installs it.
+//
+// Read once, at boot, from what the registry CLAIMS rather than from what a
+// request asks for. Three things fall out of that and all three are the point:
+// the route is a lookup and never an open, there is no request-shaped string
+// anywhere near a file path, and a claim with no file behind it is a line in
+// the startup log instead of a broken tile somebody notices next month.
+const ASSETS = fileURLToPath(new URL("../assets/", import.meta.url));
+
+function loadIcons() {
+  const icons = new Map();
+  const missing = [];
+  for (const g of GAMES) {
+    const up = g.upgrades;
+    if (!up || !up.meta || !up.icons) continue;
+    for (const [key, m] of Object.entries(up.meta)) {
+      if (!m.icon) continue;
+      // One source for both halves: the URL the page will ask for, and the
+      // file under assets/ that answers it. `upgrades.icons` is held to a
+      // shape by the registry, which is what makes the second line safe.
+      const url = up.icons + "/" + key + ".png";
+      try {
+        icons.set(url, readFileSync(ASSETS + url.slice("/assets/".length)));
+      } catch {
+        missing.push(url);
+      }
+    }
+  }
+  if (missing.length) {
+    console.warn(`[reporting] art claimed by a registry entry and not found: ${missing.join(", ")}`);
+  }
+  return icons;
+}
+
+const ICONS = loadIcons();
+
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (req.method === "GET" && path === "/healthz") {
     return send(res, 200, { ok: true, reports: store.count() });
+  }
+
+  // The registry, as data. A client that wants to know which games this
+  // service carries asks rather than being told out of band, and the portal
+  // builds its game picker from the same list the routes are validated
+  // against. Open, like every other read.
+  if (req.method === "GET" && path === "/v1/games") {
+    if (!requireKey(req, res)) return undefined;
+    const counts = store.gameCounts();
+    return send(res, 200, {
+      games: GAMES.map((g) => ({
+        id: g.id,
+        title: g.title,
+        path: "/" + g.id,
+        reports: counts[g.id] || 0,
+      })),
+      // Games that have posted reports but are not registered. Not an error:
+      // ingest takes any `game` string on purpose, so this is the list of
+      // things somebody may want to add an entry for.
+      unregistered: Object.keys(counts)
+        .filter((id) => !GAMES.some((g) => g.id === id))
+        .map((id) => ({ id, reports: counts[id] })),
+    });
   }
 
   // The portal is a static page that holds no data; everything it draws comes
@@ -258,10 +365,25 @@ function handleRequest(req, res, url) {
       "content-length": Buffer.byteLength(html),
       // No inline anything from anywhere else, and no framing.
       "content-security-policy":
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+        "img-src 'self'; connect-src 'self'; frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
     });
     return res.end(html);
+  }
+
+  if (req.method === "GET" && ICONS.has(path)) {
+    const icon = ICONS.get(path);
+    res.writeHead(200, {
+      "content-type": "image/png",
+      "content-length": icon.length,
+      // A day. Art is a game's own and changes when the game does, which is
+      // a deploy, so a stale afternoon costs nothing and the upgrade page
+      // stops asking for every icon on it each time somebody opens it.
+      "cache-control": "public, max-age=86400",
+      "x-content-type-options": "nosniff",
+    });
+    return res.end(icon);
   }
 
   if (path === "/v1/reports" && req.method === "POST") {
@@ -298,6 +420,33 @@ function handleRequest(req, res, url) {
     // is the signature itself.
     const next = nextCursor(signatures, limit, "last_seen", "signature");
     return send(res, 200, next ? { signatures, next } : { signatures });
+  }
+
+  // What players built, tallied across runs. The upgrades are read from the
+  // path the GAME'S OWN ENTRY names, so this route is not Mining Mike's: a
+  // game whose entry has no upgrades path gets an empty tally and a portal
+  // with no upgrades tab, rather than a 404 nobody can act on.
+  if (path === "/v1/upgrades" && req.method === "GET") {
+    if (!requireKey(req, res)) return undefined;
+    const q = url.searchParams;
+    const game = q.get("game") || "";
+    const upgradePath = game ? upgradePathFor(game) : null;
+    if (!upgradePath) {
+      return send(res, 200, { game, upgrades: null, runs: 0, taken: [], never: [], sectors: [] });
+    }
+    const tally = store.upgradeTally({
+      game,
+      path: upgradePath,
+      sector: q.get("sector") || undefined,
+      depth: q.get("depth") || undefined,
+    });
+    const entry = GAMES.find((g) => g.id === game);
+    return send(res, 200, {
+      game,
+      upgrades: entry.upgrades,
+      sectors: store.runPlaces({ game }),
+      ...tally,
+    });
   }
 
   // Runs are their own listing, not a filter on the fault list, because the

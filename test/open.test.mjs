@@ -9,7 +9,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +24,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
+const { registryForPage, upgradePathFor, checkUpgrades, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -333,6 +335,126 @@ test("the window comes from config, so it can follow the game's interval", async
   assert.ok(row.live === 0 || row.live === 1);
 });
 
+test("a purchase and a research unlock keep their own kind", async () => {
+  // The game posts these between runs. If the service does not know the kind,
+  // an unknown one is filed as an error and every shop visit becomes a fake
+  // crash in the issue list.
+  const post = (body) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: "spend-fixture", ...body }),
+  });
+  await post({ kind: "purchase", message: "bought repair_kit for 120 credits",
+    context: { item: "repair_kit", cost: 120, currency: "credits" } });
+  await post({ kind: "research", message: "unlocked chain_damage",
+    context: { node: "chain_damage", cost: 40 } });
+
+  const { reports } = await fetch(`${base}/v1/reports?game=spend-fixture&limit=50`)
+    .then((r) => r.json());
+  assert.deepEqual(reports.map((r) => r.kind).sort(), ["purchase", "research"],
+    "both kept the kind they were sent as");
+
+  // And neither shows up as something that went wrong.
+  const { signatures } = await fetch(`${base}/v1/signatures?game=spend-fixture`)
+    .then((r) => r.json());
+  assert.equal(signatures.length, 0, "a spend is not a fault and is not an issue");
+});
+
+// ---------------------------------------------------------------------------
+// What players built.
+//
+// The tally reads a path the GAME'S ENTRY names, so these assert the registry
+// is what drives it and not a hardcoded "mech.upgrades" somewhere.
+
+const BUILDS = "builds-fixture";
+
+test("the tally counts a run per upgrade, split by how the run ended", () => {
+  let n = 0;
+  const run = (outcome, sector, upgrades) => store.insert({
+    id: `build-${n++}`, received_at: 1_900_000_000_000 + n, game: BUILDS,
+    version: "", kind: "run", signature: "sig", title: outcome, message: outcome,
+    stack: "", log: "", platform: "", gpu: "", engine: "", session: "b", player: "",
+    context: JSON.stringify({ outcome, sector_title: sector, mech: { upgrades } }),
+  });
+  // armor is taken in three runs and clears one; shotgun in one and clears
+  // none; missiles is present in every build and picked by nobody.
+  run("succeeded", "Meridian", { armor: 2, shotgun: 0, missiles: 0 });
+  run("failed", "Meridian", { armor: 1, shotgun: 0, missiles: 0 });
+  run("failed", "Dust Hive", { armor: 3, shotgun: 1, missiles: 0 });
+  run("quit", "Dust Hive", { armor: 0, shotgun: 0, missiles: 0 });
+
+  const t = store.upgradeTally({ game: BUILDS, path: "mech.upgrades" });
+  assert.equal(t.runs, 4, "every run that carried a build counts, even an empty one");
+
+  const armor = t.taken.find((u) => u.upgrade === "armor");
+  assert.equal(armor.runs, 3, "three runs took armor");
+  assert.equal(armor.succeeded, 1);
+  assert.equal(armor.failed, 2);
+  assert.deepEqual(armor.levels.sort(), [1, 2, 3], "and the levels it was taken at");
+
+  const shotgun = t.taken.find((u) => u.upgrade === "shotgun");
+  assert.equal(shotgun.runs, 1);
+  assert.equal(shotgun.succeeded, 0);
+
+  assert.deepEqual(t.never, ["missiles"],
+    "an upgrade present in every build and picked in none is named, not dropped");
+  assert.equal(t.taken[0].upgrade, "armor", "most taken first");
+});
+
+test("the tally narrows to one place", () => {
+  const t = store.upgradeTally({ game: BUILDS, path: "mech.upgrades", sector: "Meridian" });
+  assert.equal(t.runs, 2, "only the runs in that sector");
+  const armor = t.taken.find((u) => u.upgrade === "armor");
+  assert.equal(armor.runs, 2);
+  assert.equal(armor.succeeded, 1);
+  assert.deepEqual(store.runPlaces({ game: BUILDS }).sort(), ["Dust Hive", "Meridian"]);
+});
+
+test("the path comes from the registry, so another game's word for it works too", () => {
+  // The same rows read through a DIFFERENT path return nothing, which is the
+  // proof that the path is doing the work rather than a hardcoded key.
+  const wrong = store.upgradeTally({ game: BUILDS, path: "mech.perks" });
+  assert.equal(wrong.taken.length, 0);
+  assert.equal(wrong.runs, 0);
+
+  // And a game with no entry at all has no path to read.
+  assert.equal(upgradePathFor("not-a-game"), null);
+  assert.equal(upgradePathFor("mining-mike"), "mech.upgrades");
+});
+
+test("a game with no upgrades entry gets an empty tally rather than an error", async () => {
+  const res = await fetch(`${base}/v1/upgrades?game=${BUILDS}`);
+  assert.equal(res.status, 200, "not a 404: the game is real, it just has no entry");
+  const body = await res.json();
+  assert.equal(body.upgrades, null, "and the page knows to say so");
+  assert.deepEqual(body.taken, []);
+});
+
+test("the route serves the tally for a game whose entry names the path", async () => {
+  const res = await fetch(`${base}/v1/upgrades?game=mining-mike`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.upgrades.path, "mech.upgrades", "carrying the entry it read");
+  assert.ok(Array.isArray(body.taken));
+  assert.ok(Array.isArray(body.sectors));
+});
+
+test("the upgrades page has an address of its own, per game", async () => {
+  for (const path of ["/mining-mike/upgrades", "/upgrades"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200, `${path} should serve the portal`);
+  }
+  const { state, href } = router("/mining-mike/upgrades");
+  assert.equal(state.view, "upgrades");
+  assert.equal(state.game, "mining-mike");
+  assert.equal(href(state), "/mining-mike/upgrades");
+
+  // The sector is a filter, so it stays a query, and a link to it still opens
+  // on the same screenful.
+  const filtered = router("/mining-mike/upgrades", "?sector=The%20Long%20Haul");
+  assert.equal(filtered.state.sector, "The Long Haul");
+  assert.equal(filtered.href(filtered.state), "/mining-mike/upgrades?sector=The+Long+Haul");
+});
+
 // ---------------------------------------------------------------------------
 // Paging the two top-level lists.
 //
@@ -515,6 +637,49 @@ test("every view of the portal has an address, and every one of them serves it",
   }
 });
 
+test("a registered game has every page under its own path", async () => {
+  for (const g of REGISTRY) {
+    for (const path of [
+      `/${g.id}`, `/${g.id}/issues`, `/${g.id}/issues/3f9adeadbeef`,
+      `/${g.id}/reports`, `/${g.id}/reports/${id}`,
+      `/${g.id}/sessions`, `/${g.id}/sessions/open-1`, `/${g.id}/sessions/open-1/campaign`,
+    ]) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 200, `${path} should serve the portal`);
+      assert.match(res.headers.get("content-type"), /text\/html/, path);
+    }
+  }
+});
+
+test("a game nobody registered is a 404 rather than an empty portal", async () => {
+  // The failure has to be loud. A link to a game with no entry drawing a
+  // blank page looks exactly like a game with no crashes, and those are
+  // opposite things to learn.
+  for (const path of ["/not-a-game/issues", "/not-a-game", "/test-harness/sessions"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 404, `${path} names no registered game`);
+    assert.match(res.headers.get("content-type"), /application\/json/, path);
+  }
+});
+
+test("the registry is served, with what has actually turned up against it", async () => {
+  const res = await fetch(`${base}/v1/games`);
+  assert.equal(res.status, 200);
+  const { games, unregistered } = await res.json();
+  assert.equal(games.length, REGISTRY.length, "one row per entry");
+  const mike = games.find((g) => g.id === "mining-mike");
+  assert.ok(mike, "the first game is in it");
+  assert.equal(mike.path, "/mining-mike", "carrying the path its pages live under");
+  assert.equal(typeof mike.reports, "number", "and how much it has posted");
+
+  // This file posts under several game names that have no entry. They are
+  // listed rather than hidden, because the list is the answer to "what should
+  // somebody write an entry for next".
+  assert.ok(Array.isArray(unregistered));
+  assert.ok(unregistered.some((u) => u.id === PAGED),
+    "a game with reports and no entry is named, not dropped");
+});
+
 test("an address that is not one of them is still a JSON 404", async () => {
   for (const path of ["/nonsense", "/issues/a/b", "/reports/one/two", "/sessions/a/b/c/d"]) {
     const res = await fetch(`${base}${path}`);
@@ -533,7 +698,10 @@ test("an address that is not one of them is still a JSON 404", async () => {
 // shared link is those two agreeing, so they are worth running rather than
 // reading.
 function router(pathname, search = "") {
-  const src = adminPage().match(/<script>([\s\S]*?)<\/script>/)[1];
+  // The page ships two scripts: the registry, then the code that draws with
+  // it. Take the LAST, and hand it the registry the way the browser would.
+  const scripts = [...adminPage().matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  const src = scripts[scripts.length - 1];
   const el = () => ({
     innerHTML: "", style: {}, setAttribute() {}, select() {}, remove() {},
     querySelectorAll: () => [],
@@ -545,15 +713,20 @@ function router(pathname, search = "") {
   // stubs - by the time it is waiting, the routing has already happened.
   const load = new Function(
     "document", "location", "history", "sessionStorage", "navigator", "fetch",
-    "addEventListener", "setTimeout",
-    src + "\n;return { state, href, to, readUrl };",
+    "addEventListener", "setTimeout", "GAMES",
+    src + "\n;return { state, href, to, readUrl, GAMES," +
+      " effectAt, upgradeName, upgradeArt, upgradeTip };",
   );
   return load(
     doc, loc, { pushState() {} },
     { getItem: () => "", setItem() {}, removeItem() {} },
     {}, () => new Promise(() => {}), () => {}, () => {},
+    registryForPage(),
   );
 }
+
+// The same compile, asked for what it draws rather than where it goes.
+const portal = () => router("/mining-mike/upgrades");
 
 test("an address opens the view it names", () => {
   const cases = [
@@ -588,11 +761,44 @@ test("and the view hands back the address it was opened on", () => {
   }
 });
 
-test("the game filter rides along, so a shared link is filtered as the screen was", () => {
-  const { state, href, to } = router("/sessions", "?game=mining-mike");
-  assert.equal(state.game, "mining-mike");
-  assert.equal(href(state), "/sessions?game=mining-mike");
-  assert.equal(to({ view: "reports", signature: "3f9a" }), "/issues/3f9a?game=mining-mike");
+test("a registered game is a path, so the link says which game out loud", () => {
+  const { state, href, to } = router("/mining-mike/sessions");
+  assert.equal(state.game, "mining-mike", "the leading segment is the game");
+  assert.equal(state.view, "runs", "and the rest of the path is read as it always was");
+  assert.equal(href(state), "/mining-mike/sessions", "round trips");
+  assert.equal(to({ view: "reports", signature: "3f9a" }), "/mining-mike/issues/3f9a",
+    "and it rides along into every view from there");
+});
+
+test("every registered game round trips through its own path", () => {
+  for (const g of REGISTRY) {
+    for (const tail of ["/issues", "/reports", "/sessions"]) {
+      const path = "/" + g.id + tail;
+      const { state, href } = router(path);
+      assert.equal(state.game, g.id, path + " should name " + g.id);
+      assert.equal(href(state), path, path + " should round trip");
+    }
+  }
+});
+
+test("a game with no entry is still readable, as a filter rather than a path", () => {
+  // Ingest takes any `game` string on purpose, so reports arrive from things
+  // nobody has written an entry for. Inventing a path for one would mean the
+  // router could not tell it from a typo, so it keeps the query form.
+  const { state, href } = router("/sessions", "?game=test-harness");
+  assert.equal(state.game, "test-harness");
+  assert.equal(href(state), "/sessions?game=test-harness");
+
+  // And the segment is NOT read as a game, because it is not one.
+  const stray = router("/test-harness/sessions");
+  assert.equal(stray.state.game, "", "an unregistered segment names no game");
+});
+
+test("no game at all is every game, which is the unprefixed path", () => {
+  const { state, href, to } = router("/issues");
+  assert.equal(state.game, "");
+  assert.equal(href(state), "/issues");
+  assert.equal(to({ view: "runs" }), "/sessions", "and stays unprefixed on the way in");
 });
 
 test("a session id that needs escaping still makes an address", () => {
@@ -692,4 +898,202 @@ test("a session with no runs reports open time and zero play time", async () => 
   const m = sessions.find((s) => s.session === "sess-menus");
   assert.equal(m.seconds, 546);
   assert.equal(m.played, 0, "nine minutes of shell, and the table should say so");
+});
+
+// ---------------------------------------------------------------------------
+// Upgrade art, and the hover card it sits in.
+//
+// The point of all of this is that a row says what the thing IS, not just how
+// often it was taken - and everything it says comes from the game's entry, so
+// the checks below are on the entry and on the drawing, never on the game.
+
+test("upgrade art is served, and only where there is art to serve", async () => {
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const [withArt] = Object.entries(entry.upgrades.meta).find(([, m]) => m.icon);
+  const [without] = Object.entries(entry.upgrades.meta).find(([, m]) => !m.icon);
+
+  const res = await fetch(`${base}${entry.upgrades.icons}/${withArt}.png`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  const body = Buffer.from(await res.arrayBuffer());
+  assert.deepEqual([...body.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], "and it is really a PNG");
+
+  // An upgrade the game has no art for is a 404 and not a zero-byte image, so
+  // the page's lettered tile is the only thing that ever stands in for it.
+  const missing = await fetch(`${base}${entry.upgrades.icons}/${without}.png`);
+  assert.equal(missing.status, 404);
+});
+
+// fetch() tidies a path before it puts it on the wire, and the URL parser on
+// the way in tidies it again, so a traversal typed into fetch is not one by
+// the time anything sees it. This writes the bytes as given.
+function rawGet(path) {
+  const { port } = server.address();
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => {
+      sock.write("GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    });
+    let out = "";
+    sock.setEncoding("utf8");
+    sock.on("data", (c) => { out += c; });
+    sock.on("end", () => resolve(out));
+    sock.on("error", reject);
+  });
+}
+
+test("the icon route serves icons and nothing else", async () => {
+  for (const path of [
+    "/assets/icons/mining-mike/../../../package.json",
+    "/assets/icons/../../package.json",
+    "/assets/icons/mining-mike/..%2f..%2f..%2fpackage.json",
+    "/assets/icons/mining-mike/%2e%2e/%2e%2e/package.json",
+    // Not traversals, just outside the one spelling: a second extension, a
+    // capital, a space in the game id.
+    "/assets/icons/mining-mike/max_health.png.png",
+    "/assets/icons/mining-mike/MAX_HEALTH.png",
+    "/assets/icons/mining%20mike/max_health.png",
+  ]) {
+    const raw = await rawGet(path);
+    assert.match(raw.split("\r\n")[0], /^HTTP\/1\.1 404 /, `${path} must not be served`);
+    assert.ok(!raw.includes("better-sqlite3"), "and must not leak a file either");
+  }
+
+  // These two ARE served, and are here to say why the route can get away with
+  // being a shape: the URL parser resolves . and .. before anything here sees
+  // the path, so a dotted spelling arrives as the icon itself rather than as
+  // something to work out. Nothing in the route does path arithmetic, because
+  // by the time it runs there is none left to do.
+  for (const path of [
+    "/assets/icons/mining-mike/../mining-mike/max_health.png",
+    "/assets/icons/./mining-mike/max_health.png",
+    "/assets/icons/mining-mike/max_health.png",
+  ]) {
+    const raw = await rawGet(path);
+    assert.match(raw.split("\r\n")[0], /^HTTP\/1\.1 200 /, `${path} is the icon`);
+  }
+});
+
+test("the page is allowed to load its own images and nobody else's", async () => {
+  const res = await fetch(`${base}/mining-mike/upgrades`);
+  const csp = res.headers.get("content-security-policy");
+  assert.match(csp, /img-src 'self'/, "art on the page needs saying so here");
+  assert.match(csp, /default-src 'none'/, "and everything else stays shut");
+});
+
+test("every claim of art is a file, and every file is claimed", () => {
+  for (const g of REGISTRY) {
+    if (!g.upgrades || !g.upgrades.meta) continue;
+    // The directory the ENTRY names, not one guessed from the game id: those
+    // two agreeing is a convention and this test is about the other thing.
+    const dir = new URL(".." + g.upgrades.icons + "/", import.meta.url);
+    const claimed = Object.entries(g.upgrades.meta)
+      .filter(([, m]) => m.icon).map(([key]) => key + ".png").sort();
+    const onDisk = existsSync(dir) ? readdirSync(dir).sort() : [];
+    // Both directions. A claim with no file is a broken image on the page; a
+    // file with no claim is art somebody drew and the page never shows.
+    assert.deepEqual(onDisk, claimed, `${g.id}: art on disk and art in the entry must agree`);
+  }
+});
+
+test("an effect is written out at the level it is asked about", () => {
+  const { effectAt } = portal();
+  // [per level, flat], so level 3 of [25, 0] is 75.
+  assert.equal(effectAt(["+25 Max HP (+{0} total)", [25, 0]], 3), "+25 Max HP (+75 total)");
+  // Two numbers, each its own pair, and the flat part is not multiplied.
+  assert.equal(effectAt(["Deal {0} DPS in {1}px radius", [8, 0], [30, 60]], 2),
+    "Deal 16 DPS in 120px radius");
+  assert.equal(effectAt(["Fire {0} projectiles in a spread", [1, 2]], 1),
+    "Fire 3 projectiles in a spread");
+  // The registry is the only source of these, and a game with none still draws.
+  assert.equal(effectAt(null, 3), "");
+});
+
+test("the hover card says what the thing is, at the level people reach", () => {
+  const { upgradeTip } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const tip = upgradeTip(
+    { upgrade: "max_health", runs: 8, succeeded: 2, failed: 5, died: 0, quit: 1,
+      levels: [1, 2, 3, 3, 4, 5, 3, 2] },
+    entry.upgrades, false,
+  );
+  assert.match(tip, /Vitality/, "the name a player would recognise");
+  assert.match(tip, /max_health/, "and the key, for anybody reading the JSON");
+  assert.match(tip, /\+75 total/, "the effect at the level typically reached");
+  assert.match(tip, /\+125 total/, "and at its ceiling, which is what it is worth chasing for");
+  assert.match(tip, /1 to 5/, "the spread of levels behind that");
+  assert.match(tip, /succeeded/, "and how the runs that took it ended");
+  assert.match(tip, /25%/, "as a share, since eight runs is a denominator");
+  // died is zero and is left out.
+  assert.ok(!/>died</.test(tip), "an outcome nobody hit is not a row");
+
+  // A clear is the exception. "succeeded 0" is the most useful line this card
+  // has, and it cannot be one that only appears when the news is good.
+  const never = upgradeTip(
+    { upgrade: "turret_damage", runs: 9, succeeded: 0, failed: 9, died: 0, quit: 0,
+      levels: [5, 5, 5, 5, 5, 5, 5, 5, 5] },
+    entry.upgrades, false,
+  );
+  assert.match(never, />succeeded</, "nine runs, no clears, and the card says so");
+  assert.match(never, /typically 5/, "and that they all took it to the ceiling");
+});
+
+test("a clear rate needs a denominator worth dividing by", () => {
+  const { upgradeTip } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const two = upgradeTip(
+    { upgrade: "max_health", runs: 2, succeeded: 2, failed: 0, died: 0, quit: 0, levels: [1, 2] },
+    entry.upgrades, false,
+  );
+  assert.ok(!/100%/.test(two), "two runs that cleared are two runs, not a 100% clear rate");
+  assert.match(two, /succeeded/);
+  const three = upgradeTip(
+    { upgrade: "max_health", runs: 3, succeeded: 3, failed: 0, died: 0, quit: 0, levels: [1, 2, 3] },
+    entry.upgrades, false,
+  );
+  assert.match(three, /100%/, "three is where the tally starts printing shares, and this agrees");
+});
+
+test("an upgrade with no art draws a tile instead of a broken image", () => {
+  const { upgradeArt } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const [withArt] = Object.entries(entry.upgrades.meta).find(([, m]) => m.icon);
+  const [without] = Object.entries(entry.upgrades.meta).find(([, m]) => !m.icon);
+  assert.match(upgradeArt(entry.upgrades, withArt), /<img class="up-icon"/);
+  assert.ok(!/<img/.test(upgradeArt(entry.upgrades, without)), "no art means no <img> at all");
+  assert.match(upgradeArt(entry.upgrades, without), /class="up-tile"/);
+  // A game that has written no vocabulary gets the same page, one tile per row.
+  assert.match(upgradeArt({ path: "x" }, "some_key"), /class="up-tile"/);
+});
+
+test("the vocabulary is checked, and the check is checked", () => {
+  const ok = { path: "mech.upgrades", icons: "/assets/icons/x", meta: {} };
+  const bad = (meta, over = {}) => () => checkUpgrades({ id: "x", upgrades: { ...ok, ...over, meta } });
+
+  // Every one of these draws a page that looks fine and reads wrong, which is
+  // why they are refused at import rather than left to be noticed.
+  assert.throws(bad({ a: { effect: ["says {1}", [1, 0]] } }), /\{1\}/, "a slot with no number for it");
+  assert.throws(bad({ a: { effect: ["says {0}", [1, 0], [2, 0]] } }), /nothing says/, "a number no slot shows");
+  assert.throws(bad({ a: { effect: ["says {0}", 5] } }), /pair/, "a number that is not a pair");
+  assert.throws(bad({ a: { effect: ["says {0}", [1, "x"]] } }), /pair/, "a pair that is not numbers");
+  assert.throws(bad({ "../etc": { name: "n" } }), /file name/, "a key that is not a file name");
+  assert.throws(bad({ a: { icon: true } }, { icons: undefined }), /no icons path/, "art with nowhere to load it from");
+  assert.throws(bad({ a: {} }, { icons: "https://elsewhere.example" }), /not a path/, "art from somewhere else");
+  assert.throws(bad({ a: {} }, { icons: "/v1" }), /not a path/, "art at an address the API already owns");
+
+  // And the shapes that are right stay right.
+  assert.doesNotThrow(bad({ a: { name: "A", max: 3, icon: true, effect: ["says {0} and {1}", [1, 0], [0, 9]] } }));
+  assert.doesNotThrow(bad({ a: { name: "A" } }), "vocabulary without an effect is allowed");
+});
+
+test("the vocabulary rides on the view that asks for it, not on every page", async () => {
+  // 28 upgrades of names and effects is worth carrying to the one page that
+  // draws them and not worth carrying to the other five.
+  const onPage = JSON.stringify(registryForPage());
+  assert.ok(!onPage.includes("Vitality"), "the page's copy of the registry stays lean");
+  assert.ok(onPage.includes("mech.upgrades"), "but still says which games have upgrades at all");
+
+  const res = await fetch(`${base}/v1/upgrades?game=mining-mike`);
+  const body = await res.json();
+  assert.equal(body.upgrades.meta.max_health.name, "Vitality", "and the view that draws them gets them");
+  assert.equal(body.upgrades.icons, "/assets/icons/mining-mike");
 });
