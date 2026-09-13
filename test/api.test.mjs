@@ -210,6 +210,18 @@ test("with ADMIN_KEY set, reading and deleting both want it", async () => {
   assert.equal(del.status, 401, "deleting should be closed too");
 });
 
+test("upgrade art stays open, because an <img> cannot carry a key", async () => {
+  // The one read that is open even here. A key on this route would mean the
+  // portal drawing broken tiles at exactly the person who HAS the key, and
+  // there is nothing behind it: it is the same art the game ships to anybody
+  // who installs it. What is closed is what the art sits next to.
+  const art = await fetch(`${base}/assets/icons/mining-mike/max_health.png`);
+  assert.equal(art.status, 200);
+  assert.equal(art.headers.get("content-type"), "image/png");
+  assert.equal((await fetch(`${base}/v1/upgrades?game=mining-mike`)).status, 401,
+    "the tally it illustrates is still behind the key");
+});
+
 test("a report without a game or without any content is refused", async () => {
   assert.equal((await post({ message: "no game field" })).status, 400);
   assert.equal((await post({ game: "mining-mike" })).status, 400);

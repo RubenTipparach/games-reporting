@@ -9,7 +9,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +24,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
-const { registryForPage, upgradePathFor, GAMES: REGISTRY } = await import("../src/games.js");
+const { registryForPage, upgradePathFor, checkUpgrades, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -713,7 +714,8 @@ function router(pathname, search = "") {
   const load = new Function(
     "document", "location", "history", "sessionStorage", "navigator", "fetch",
     "addEventListener", "setTimeout", "GAMES",
-    src + "\n;return { state, href, to, readUrl, GAMES };",
+    src + "\n;return { state, href, to, readUrl, GAMES," +
+      " effectAt, upgradeName, upgradeArt, upgradeTip };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -722,6 +724,9 @@ function router(pathname, search = "") {
     registryForPage(),
   );
 }
+
+// The same compile, asked for what it draws rather than where it goes.
+const portal = () => router("/mining-mike/upgrades");
 
 test("an address opens the view it names", () => {
   const cases = [
@@ -893,4 +898,202 @@ test("a session with no runs reports open time and zero play time", async () => 
   const m = sessions.find((s) => s.session === "sess-menus");
   assert.equal(m.seconds, 546);
   assert.equal(m.played, 0, "nine minutes of shell, and the table should say so");
+});
+
+// ---------------------------------------------------------------------------
+// Upgrade art, and the hover card it sits in.
+//
+// The point of all of this is that a row says what the thing IS, not just how
+// often it was taken - and everything it says comes from the game's entry, so
+// the checks below are on the entry and on the drawing, never on the game.
+
+test("upgrade art is served, and only where there is art to serve", async () => {
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const [withArt] = Object.entries(entry.upgrades.meta).find(([, m]) => m.icon);
+  const [without] = Object.entries(entry.upgrades.meta).find(([, m]) => !m.icon);
+
+  const res = await fetch(`${base}${entry.upgrades.icons}/${withArt}.png`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  const body = Buffer.from(await res.arrayBuffer());
+  assert.deepEqual([...body.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], "and it is really a PNG");
+
+  // An upgrade the game has no art for is a 404 and not a zero-byte image, so
+  // the page's lettered tile is the only thing that ever stands in for it.
+  const missing = await fetch(`${base}${entry.upgrades.icons}/${without}.png`);
+  assert.equal(missing.status, 404);
+});
+
+// fetch() tidies a path before it puts it on the wire, and the URL parser on
+// the way in tidies it again, so a traversal typed into fetch is not one by
+// the time anything sees it. This writes the bytes as given.
+function rawGet(path) {
+  const { port } = server.address();
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => {
+      sock.write("GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    });
+    let out = "";
+    sock.setEncoding("utf8");
+    sock.on("data", (c) => { out += c; });
+    sock.on("end", () => resolve(out));
+    sock.on("error", reject);
+  });
+}
+
+test("the icon route serves icons and nothing else", async () => {
+  for (const path of [
+    "/assets/icons/mining-mike/../../../package.json",
+    "/assets/icons/../../package.json",
+    "/assets/icons/mining-mike/..%2f..%2f..%2fpackage.json",
+    "/assets/icons/mining-mike/%2e%2e/%2e%2e/package.json",
+    // Not traversals, just outside the one spelling: a second extension, a
+    // capital, a space in the game id.
+    "/assets/icons/mining-mike/max_health.png.png",
+    "/assets/icons/mining-mike/MAX_HEALTH.png",
+    "/assets/icons/mining%20mike/max_health.png",
+  ]) {
+    const raw = await rawGet(path);
+    assert.match(raw.split("\r\n")[0], /^HTTP\/1\.1 404 /, `${path} must not be served`);
+    assert.ok(!raw.includes("better-sqlite3"), "and must not leak a file either");
+  }
+
+  // These two ARE served, and are here to say why the route can get away with
+  // being a shape: the URL parser resolves . and .. before anything here sees
+  // the path, so a dotted spelling arrives as the icon itself rather than as
+  // something to work out. Nothing in the route does path arithmetic, because
+  // by the time it runs there is none left to do.
+  for (const path of [
+    "/assets/icons/mining-mike/../mining-mike/max_health.png",
+    "/assets/icons/./mining-mike/max_health.png",
+    "/assets/icons/mining-mike/max_health.png",
+  ]) {
+    const raw = await rawGet(path);
+    assert.match(raw.split("\r\n")[0], /^HTTP\/1\.1 200 /, `${path} is the icon`);
+  }
+});
+
+test("the page is allowed to load its own images and nobody else's", async () => {
+  const res = await fetch(`${base}/mining-mike/upgrades`);
+  const csp = res.headers.get("content-security-policy");
+  assert.match(csp, /img-src 'self'/, "art on the page needs saying so here");
+  assert.match(csp, /default-src 'none'/, "and everything else stays shut");
+});
+
+test("every claim of art is a file, and every file is claimed", () => {
+  for (const g of REGISTRY) {
+    if (!g.upgrades || !g.upgrades.meta) continue;
+    // The directory the ENTRY names, not one guessed from the game id: those
+    // two agreeing is a convention and this test is about the other thing.
+    const dir = new URL(".." + g.upgrades.icons + "/", import.meta.url);
+    const claimed = Object.entries(g.upgrades.meta)
+      .filter(([, m]) => m.icon).map(([key]) => key + ".png").sort();
+    const onDisk = existsSync(dir) ? readdirSync(dir).sort() : [];
+    // Both directions. A claim with no file is a broken image on the page; a
+    // file with no claim is art somebody drew and the page never shows.
+    assert.deepEqual(onDisk, claimed, `${g.id}: art on disk and art in the entry must agree`);
+  }
+});
+
+test("an effect is written out at the level it is asked about", () => {
+  const { effectAt } = portal();
+  // [per level, flat], so level 3 of [25, 0] is 75.
+  assert.equal(effectAt(["+25 Max HP (+{0} total)", [25, 0]], 3), "+25 Max HP (+75 total)");
+  // Two numbers, each its own pair, and the flat part is not multiplied.
+  assert.equal(effectAt(["Deal {0} DPS in {1}px radius", [8, 0], [30, 60]], 2),
+    "Deal 16 DPS in 120px radius");
+  assert.equal(effectAt(["Fire {0} projectiles in a spread", [1, 2]], 1),
+    "Fire 3 projectiles in a spread");
+  // The registry is the only source of these, and a game with none still draws.
+  assert.equal(effectAt(null, 3), "");
+});
+
+test("the hover card says what the thing is, at the level people reach", () => {
+  const { upgradeTip } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const tip = upgradeTip(
+    { upgrade: "max_health", runs: 8, succeeded: 2, failed: 5, died: 0, quit: 1,
+      levels: [1, 2, 3, 3, 4, 5, 3, 2] },
+    entry.upgrades, false,
+  );
+  assert.match(tip, /Vitality/, "the name a player would recognise");
+  assert.match(tip, /max_health/, "and the key, for anybody reading the JSON");
+  assert.match(tip, /\+75 total/, "the effect at the level typically reached");
+  assert.match(tip, /\+125 total/, "and at its ceiling, which is what it is worth chasing for");
+  assert.match(tip, /1 to 5/, "the spread of levels behind that");
+  assert.match(tip, /succeeded/, "and how the runs that took it ended");
+  assert.match(tip, /25%/, "as a share, since eight runs is a denominator");
+  // died is zero and is left out.
+  assert.ok(!/>died</.test(tip), "an outcome nobody hit is not a row");
+
+  // A clear is the exception. "succeeded 0" is the most useful line this card
+  // has, and it cannot be one that only appears when the news is good.
+  const never = upgradeTip(
+    { upgrade: "turret_damage", runs: 9, succeeded: 0, failed: 9, died: 0, quit: 0,
+      levels: [5, 5, 5, 5, 5, 5, 5, 5, 5] },
+    entry.upgrades, false,
+  );
+  assert.match(never, />succeeded</, "nine runs, no clears, and the card says so");
+  assert.match(never, /typically 5/, "and that they all took it to the ceiling");
+});
+
+test("a clear rate needs a denominator worth dividing by", () => {
+  const { upgradeTip } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const two = upgradeTip(
+    { upgrade: "max_health", runs: 2, succeeded: 2, failed: 0, died: 0, quit: 0, levels: [1, 2] },
+    entry.upgrades, false,
+  );
+  assert.ok(!/100%/.test(two), "two runs that cleared are two runs, not a 100% clear rate");
+  assert.match(two, /succeeded/);
+  const three = upgradeTip(
+    { upgrade: "max_health", runs: 3, succeeded: 3, failed: 0, died: 0, quit: 0, levels: [1, 2, 3] },
+    entry.upgrades, false,
+  );
+  assert.match(three, /100%/, "three is where the tally starts printing shares, and this agrees");
+});
+
+test("an upgrade with no art draws a tile instead of a broken image", () => {
+  const { upgradeArt } = portal();
+  const entry = REGISTRY.find((g) => g.id === "mining-mike");
+  const [withArt] = Object.entries(entry.upgrades.meta).find(([, m]) => m.icon);
+  const [without] = Object.entries(entry.upgrades.meta).find(([, m]) => !m.icon);
+  assert.match(upgradeArt(entry.upgrades, withArt), /<img class="up-icon"/);
+  assert.ok(!/<img/.test(upgradeArt(entry.upgrades, without)), "no art means no <img> at all");
+  assert.match(upgradeArt(entry.upgrades, without), /class="up-tile"/);
+  // A game that has written no vocabulary gets the same page, one tile per row.
+  assert.match(upgradeArt({ path: "x" }, "some_key"), /class="up-tile"/);
+});
+
+test("the vocabulary is checked, and the check is checked", () => {
+  const ok = { path: "mech.upgrades", icons: "/assets/icons/x", meta: {} };
+  const bad = (meta, over = {}) => () => checkUpgrades({ id: "x", upgrades: { ...ok, ...over, meta } });
+
+  // Every one of these draws a page that looks fine and reads wrong, which is
+  // why they are refused at import rather than left to be noticed.
+  assert.throws(bad({ a: { effect: ["says {1}", [1, 0]] } }), /\{1\}/, "a slot with no number for it");
+  assert.throws(bad({ a: { effect: ["says {0}", [1, 0], [2, 0]] } }), /nothing says/, "a number no slot shows");
+  assert.throws(bad({ a: { effect: ["says {0}", 5] } }), /pair/, "a number that is not a pair");
+  assert.throws(bad({ a: { effect: ["says {0}", [1, "x"]] } }), /pair/, "a pair that is not numbers");
+  assert.throws(bad({ "../etc": { name: "n" } }), /file name/, "a key that is not a file name");
+  assert.throws(bad({ a: { icon: true } }, { icons: undefined }), /no icons path/, "art with nowhere to load it from");
+  assert.throws(bad({ a: {} }, { icons: "https://elsewhere.example" }), /not a path/, "art from somewhere else");
+  assert.throws(bad({ a: {} }, { icons: "/v1" }), /not a path/, "art at an address the API already owns");
+
+  // And the shapes that are right stay right.
+  assert.doesNotThrow(bad({ a: { name: "A", max: 3, icon: true, effect: ["says {0} and {1}", [1, 0], [0, 9]] } }));
+  assert.doesNotThrow(bad({ a: { name: "A" } }), "vocabulary without an effect is allowed");
+});
+
+test("the vocabulary rides on the view that asks for it, not on every page", async () => {
+  // 28 upgrades of names and effects is worth carrying to the one page that
+  // draws them and not worth carrying to the other five.
+  const onPage = JSON.stringify(registryForPage());
+  assert.ok(!onPage.includes("Vitality"), "the page's copy of the registry stays lean");
+  assert.ok(onPage.includes("mech.upgrades"), "but still says which games have upgrades at all");
+
+  const res = await fetch(`${base}/v1/upgrades?game=mining-mike`);
+  const body = await res.json();
+  assert.equal(body.upgrades.meta.max_health.name, "Vitality", "and the view that draws them gets them");
+  assert.equal(body.upgrades.icons, "/assets/icons/mining-mike");
 });

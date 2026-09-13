@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { openDatabase, PAGE, pageLimit } from "./db.js";
 import { RateLimiter } from "./ratelimit.js";
@@ -274,6 +276,50 @@ function nextCursor(rows, limit, key, id) {
   return { before: last[key], before_id: last[id] };
 }
 
+// Upgrade art: the only bytes this service serves that are not JSON or the
+// page. Which files exist is a game's business and lives in its registry entry
+// (`upgrades.icons` and `icon: true`); what is here is the reading of them,
+// which is the same for every game.
+//
+// OPEN, even when ADMIN_KEY closes the reads. An <img> cannot carry a header,
+// so a key on this route would mean the portal drawing broken tiles at exactly
+// the person who has the key. There is nothing behind it to protect: it is the
+// same art the game hands to anybody who installs it.
+//
+// Read once, at boot, from what the registry CLAIMS rather than from what a
+// request asks for. Three things fall out of that and all three are the point:
+// the route is a lookup and never an open, there is no request-shaped string
+// anywhere near a file path, and a claim with no file behind it is a line in
+// the startup log instead of a broken tile somebody notices next month.
+const ASSETS = fileURLToPath(new URL("../assets/", import.meta.url));
+
+function loadIcons() {
+  const icons = new Map();
+  const missing = [];
+  for (const g of GAMES) {
+    const up = g.upgrades;
+    if (!up || !up.meta || !up.icons) continue;
+    for (const [key, m] of Object.entries(up.meta)) {
+      if (!m.icon) continue;
+      // One source for both halves: the URL the page will ask for, and the
+      // file under assets/ that answers it. `upgrades.icons` is held to a
+      // shape by the registry, which is what makes the second line safe.
+      const url = up.icons + "/" + key + ".png";
+      try {
+        icons.set(url, readFileSync(ASSETS + url.slice("/assets/".length)));
+      } catch {
+        missing.push(url);
+      }
+    }
+  }
+  if (missing.length) {
+    console.warn(`[reporting] art claimed by a registry entry and not found: ${missing.join(", ")}`);
+  }
+  return icons;
+}
+
+const ICONS = loadIcons();
+
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -319,10 +365,25 @@ function handleRequest(req, res, url) {
       "content-length": Buffer.byteLength(html),
       // No inline anything from anywhere else, and no framing.
       "content-security-policy":
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+        "img-src 'self'; connect-src 'self'; frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
     });
     return res.end(html);
+  }
+
+  if (req.method === "GET" && ICONS.has(path)) {
+    const icon = ICONS.get(path);
+    res.writeHead(200, {
+      "content-type": "image/png",
+      "content-length": icon.length,
+      // A day. Art is a game's own and changes when the game does, which is
+      // a deploy, so a stale afternoon costs nothing and the upgrade page
+      // stops asking for every icon on it each time somebody opens it.
+      "cache-control": "public, max-age=86400",
+      "x-content-type-options": "nosniff",
+    });
+    return res.end(icon);
   }
 
   if (path === "/v1/reports" && req.method === "POST") {

@@ -45,6 +45,8 @@ for every game and the registry says nothing about them:
 | `place.wavesPerDepth` | how much of one counts as finishing it |
 | `blocks` | which of the game's own context keys are worth a line |
 | `upgrades.path` | the context path holding what a player built, name to level |
+| `upgrades.meta` | what the game calls each of those, and what taking one does |
+| `upgrades.icons` | where that game's art lives, one `<key>.png` per upgrade |
 
 ## Adding a game
 
@@ -85,6 +87,30 @@ could hold functions could not be handed to the thing that draws it.
 
 If a game needs a row shape this grammar cannot express, **add the shape to
 the grammar** in `rowPairs()`. Do not add a branch for the game.
+
+### The effect grammar
+
+`upgrades.meta` is the same idea for a different question: not where a number
+is, but what a number MEANS. An effect is a sentence kept apart from its
+numbers, so the page can write it out at whatever level it is asked about:
+
+```js
+effect: ["+25 Max HP (+{0} total)", [25, 0]]
+```
+
+`{0}` is the first pair, `[per level, flat]`, so level 3 reads `+75 total`.
+Kept apart and not baked in at one level because the useful question is what
+the thing does AT THE LEVEL PEOPLE ACTUALLY REACH, and the page only learns
+that from the tally.
+
+A sentence and its numbers can disagree, and they disagree silently: a `{1}`
+with nothing to fill it prints as `{1}`. So `checkUpgrades()` refuses both
+halves of that at import, and is exported so the check itself can be run
+against an entry that is wrong.
+
+`icon: false` is art the game does not have. The page draws a lettered tile,
+which is what the game draws too - a hole somebody can see beats a broken
+image, and beats pretending the upgrade is not there.
 
 ## Charts
 

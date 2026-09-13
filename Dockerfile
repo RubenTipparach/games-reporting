@@ -15,6 +15,8 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
+# Upgrade art. Small, static, and served straight off disk by src/server.js.
+COPY assets ./assets
 
 # The volume is mounted here (see fly.toml). Created so a machine with no
 # volume still starts rather than crash-looping on a missing directory - it

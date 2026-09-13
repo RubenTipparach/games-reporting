@@ -111,10 +111,22 @@ pre {
 .err { color: var(--crash); }
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
 .more { display: flex; gap: 10px; align-items: center; margin: 14px 0 0; }
-/* The upgrade tally. One row per upgrade: a stacked bar whose LENGTH is how
-   many runs took it and whose segments are how those runs ended. */
-.up-row { display: grid; grid-template-columns: 170px 1fr auto; gap: 12px; align-items: center; }
+/* The upgrade tally. One row per upgrade: its art, what the game calls it, a
+   stacked bar whose LENGTH is how many runs took it and whose segments are how
+   those runs ended, and the counts. The row is a hit target as well as a line:
+   hovering it says what taking the thing actually does. */
+.up-row { position: relative; display: grid; gap: 12px; align-items: center;
+          grid-template-columns: 190px 1fr auto;
+          padding: 3px 6px; margin: 0 -6px; border-radius: 6px; }
+.up-art .up-row { grid-template-columns: 32px 190px 1fr auto; }
+.up-row:hover, .up-row:focus-within { background: #1b212a; outline: none; }
 .up-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-icon { width: 32px; height: 32px; display: block; }
+/* An upgrade the game has no art for. It draws a lettered tile in-game for
+   these too, so this is not the page inventing a hole - it is the same hole. */
+.up-tile { width: 32px; height: 32px; display: grid; place-items: center;
+           border: 1px solid var(--line); border-radius: 6px; background: #10151c;
+           color: var(--dim); font-size: 13px; }
 .up-track { display: flex; height: 17px; background: #10151c; border: 1px solid var(--line);
             border-radius: 2px; overflow: hidden; }
 /* A 2px gap of surface between segments. Succeeded and failed are only dE 7.2
@@ -126,6 +138,29 @@ pre {
 .up-seg-died      { background: #a83a32; }
 .up-seg-quit      { background: var(--warn); }
 .up-tail { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The hover card. CSS and not a mousemove handler because the page redraws
+   itself by replacing innerHTML, and anything that had to be re-bound after a
+   redraw would be re-bound wrongly exactly once. The row is also focusable, so
+   the card is reachable by tab as well as by pointer. */
+.up-tip { position: absolute; z-index: 20; left: 0; top: calc(100% - 2px);
+          display: none; width: 340px; max-width: 90vw; padding: 12px 14px;
+          background: #0b0e12; border: 1px solid var(--accent); border-radius: 8px;
+          box-shadow: 0 12px 34px rgba(0, 0, 0, .6); cursor: default; }
+.up-row:hover .up-tip, .up-row:focus-within .up-tip { display: block; }
+/* Rows near the bottom open upwards, so the last one in a long tally does not
+   hang the card off the end of the document. */
+.up-tip.above { top: auto; bottom: calc(100% - 2px); }
+.up-tip h3 { font-size: 14px; margin: 0; color: var(--text); text-transform: none; letter-spacing: 0; }
+.up-tip-head { display: flex; gap: 12px; align-items: center; }
+.up-tip-head img { width: 48px; height: 48px; }
+.up-tip-head .up-tile { width: 48px; height: 48px; font-size: 18px; }
+.up-tip-eff { margin: 10px 0 0; }
+.up-tip-eff b { color: var(--accent); font-weight: 600; }
+.up-stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+            margin: 10px 0 0; font-variant-numeric: tabular-nums; }
+.up-stats dt { color: var(--dim); }
+.up-stats dd { margin: 0; display: flex; align-items: center; gap: 7px; }
+.up-stats i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
 .legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -543,6 +578,88 @@ function upgradeLegend() {
     '<span><i class="up-seg-' + o + '"></i>' + esc(o) + '</span>').join("") + '</p>';
 }
 
+// An effect is a sentence and its numbers, kept apart in the registry so the
+// numbers can be worked out FOR A LEVEL rather than baked in at one of them.
+// {0} is the first pair and a pair is [per level, flat], so [25, 0] at level 3
+// is 75. A pair and not a function because the registry arrives here as JSON.
+function effectAt(effect, level) {
+  if (!effect || !effect.length) return "";
+  const args = effect.slice(1);
+  return String(effect[0]).replace(/\{(\d+)\}/g, (slot, i) => {
+    const pair = args[Number(i)];
+    return pair ? String(level * pair[0] + pair[1]) : slot;
+  });
+}
+
+// What the page knows about one upgrade beyond its key: whatever this game's
+// entry says, and nothing at all if the entry says nothing. Everything below
+// degrades to the bare key, so a game that has written no vocabulary yet gets
+// the same page with fewer words on it.
+function upgradeMeta(upgrades, key) {
+  return (upgrades && upgrades.meta && upgrades.meta[key]) || null;
+}
+
+function upgradeName(upgrades, key) {
+  const m = upgradeMeta(upgrades, key);
+  return (m && m.name) || key;
+}
+
+// The art, or the lettered tile standing in for art the game does not have.
+// Missing art is a fact about the game and not an error, so it is drawn rather
+// than left as a broken image: the game itself draws a lettered card for these.
+function upgradeArt(upgrades, key) {
+  const m = upgradeMeta(upgrades, key);
+  if (m && m.icon && upgrades.icons) {
+    return '<img class="up-icon" alt="" width="32" height="32" src="' +
+      esc(upgrades.icons + "/" + key + ".png") + '">';
+  }
+  return '<span class="up-tile" aria-hidden="true">' +
+    esc(upgradeName(upgrades, key).slice(0, 1).toUpperCase()) + '</span>';
+}
+
+// The hover card: what this upgrade is, what taking it does at the level
+// people actually reach and at its ceiling, and how the runs that took it
+// ended. The bar says how OFTEN and how it WENT; this says what it IS, which
+// is the question a bar cannot answer and the one everybody asks first.
+function upgradeTip(u, upgrades, above) {
+  const m = upgradeMeta(upgrades, u.upgrade);
+  const unit = upgrades.unit || "lvl";
+  const lv = median(u.levels);
+  const lo = u.levels.length ? Math.min.apply(null, u.levels) : lv;
+  const hi = u.levels.length ? Math.max.apply(null, u.levels) : lv;
+  // The same denominator rule the tally follows. One run that cleared is one
+  // run and not a 100% clear rate, so nothing here is a share until three.
+  const share = (n) => u.runs >= 3
+    ? ' <span class="dim">' + Math.round(n / u.runs * 100) + '%</span>' : '';
+  // An outcome nobody hit is left out, EXCEPT a clear: "succeeded 0" is the
+  // most useful line this card has and it cannot be one that only appears
+  // when the news is good.
+  const line = (o) => (u[o] || o === "succeeded")
+    ? '<dt>' + esc(o) + '</dt><dd><i class="up-seg-' + o + '"></i>' + u[o] + share(u[o]) + '</dd>'
+    : '';
+  const eff = m && m.effect
+    ? '<p class="up-tip-eff"><b>' + esc(unit) + ' ' + lv + '</b>' +
+        (m.max ? ' <span class="dim">of ' + m.max + '</span>' : '') +
+        ' &middot; ' + esc(effectAt(m.effect, lv)) + '</p>' +
+      (m.max && lv < m.max
+        ? '<p class="up-tip-eff dim">' + esc(unit) + ' ' + m.max + ' &middot; ' +
+          esc(effectAt(m.effect, m.max)) + '</p>'
+        : '')
+    : '';
+  return '<div class="up-tip' + (above ? " above" : "") + '" role="tooltip">' +
+    '<div class="up-tip-head">' + upgradeArt(upgrades, u.upgrade) +
+      '<div><h3>' + esc(upgradeName(upgrades, u.upgrade)) + '</h3>' +
+      (m && m.name ? '<span class="dim">' + esc(u.upgrade) + '</span>' : '') +
+      '</div></div>' + eff +
+    '<dl class="up-stats">' +
+      '<dt>runs</dt><dd>' + u.runs + '</dd>' +
+      '<dt>' + esc(unit) + ' reached</dt><dd>' +
+        (lo === hi ? lo : lo + ' to ' + hi) +
+        ' <span class="dim">typically ' + lv + '</span></dd>' +
+      OUTCOMES.map(line).join("") +
+    '</dl></div>';
+}
+
 async function viewUpgrades() {
   const q = new URLSearchParams();
   if (state.game) q.set("game", state.game);
@@ -561,7 +678,11 @@ async function viewUpgrades() {
   }
 
   const most = Math.max(1, ...body.taken.map((u) => u.runs));
-  const rows = body.taken.map((u) => {
+  // A game whose entry names its upgrades gets a column of art; one that does
+  // not gets the same rows, one column narrower. Neither is a branch on WHICH
+  // game it is - it is a branch on how much the entry has to say.
+  const named = !!body.upgrades.meta;
+  const rows = body.taken.map((u, i) => {
     const cleared = u.succeeded;
     // A share needs a denominator worth dividing by. One run that cleared is
     // not a 100% clear rate, it is one run, and printing the percentage is how
@@ -569,24 +690,33 @@ async function viewUpgrades() {
     const pct = u.runs >= 3 ? Math.round((cleared / u.runs) * 100) : null;
     const seg = (o) => u[o]
       ? '<span class="up-seg up-seg-' + o + '" style="width:' +
-        (u[o] / most * 100) + '%" title="' + u[o] + ' ' + esc(o) + '"></span>'
+        (u[o] / most * 100) + '%"></span>'
       : "";
-    return '<div class="up-row">' +
-      '<span class="up-name" title="' + esc(u.upgrade) + '">' + esc(u.upgrade) + '</span>' +
+    // Far enough down the list that a card opening downwards would hang off
+    // the end of it, and far enough from the top that opening upwards has
+    // somewhere to open into.
+    const above = i >= 4 && i >= body.taken.length - 3;
+    return '<div class="up-row" tabindex="0">' +
+      (named ? upgradeArt(body.upgrades, u.upgrade) : "") +
+      '<span class="up-name">' + esc(upgradeName(body.upgrades, u.upgrade)) + '</span>' +
       '<span class="up-track">' + OUTCOMES.map(seg).join("") + '</span>' +
       '<span class="up-tail dim">' + u.runs + ' run' + (u.runs === 1 ? "" : "s") +
         ' &middot; <span class="' + (cleared ? "outcome-succeeded" : "dim") + '">' +
         cleared + ' cleared</span>' +
         (pct === null ? '' : ' <span class="dim">' + pct + '%</span>') +
         ' &middot; ' + esc(body.upgrades.unit || "lvl") + ' ' + median(u.levels) +
-      '</span></div>';
+      '</span>' +
+      upgradeTip(u, body.upgrades, above) +
+      '</div>';
   }).join("");
 
   const never = body.never.length
     ? '<div class="card never"><h2>Never taken</h2>' +
       '<p class="dim">Present in the build every run reports, and picked in none of them. ' +
       'The loudest thing this page has to say, and invisible if it only listed what was.</p>' +
-      '<p>' + body.never.map((n) => '<span class="dim">' + esc(n) + '</span>').join(" &middot; ") +
+      '<p>' + body.never.map((n) =>
+        '<span class="dim" title="' + esc(n) + '">' +
+        esc(upgradeName(body.upgrades, n)) + '</span>').join(" &middot; ") +
       '</p></div>'
     : "";
 
@@ -594,7 +724,9 @@ async function viewUpgrades() {
     '<div class="card"><h2>' + esc(body.upgrades.title || "Upgrades") +
       ' <span class="dim">across ' + body.runs + ' run' + (body.runs === 1 ? "" : "s") +
       (state.sector ? ' in ' + esc(state.sector) : '') + '</span></h2>' +
-    upgradeLegend() + rows + '</div>' + never;
+    upgradeLegend() +
+    '<div class="up-list' + (named ? " up-art" : "") + '">' + rows + '</div>' +
+    '</div>' + never;
 }
 
 // The sectors runs happened in, as filters. Same idiom as the mode chips on a
