@@ -84,6 +84,7 @@ opens on the thing you were looking at.
 | `/mining-mike/sessions` | Every session, with playtime and which are still running |
 | `/mining-mike/sessions/<session>` | One session: its runs and how far they got |
 | `/mining-mike/sessions/<session>/<mode>` | The same, narrowed to campaign or survival |
+| `/mining-mike/upgrades` | What players built, and how those runs ended |
 
 Drop the prefix for the same pages across every game: `/issues`, `/reports`,
 `/sessions`. The toolbar's picker switches between them, and whichever you
@@ -108,6 +109,7 @@ around the key.
 | --- | --- | --- |
 | `GET /healthz` | none | Liveness, plus how many reports are held |
 | `GET /v1/games` | admin | The game registry, and what has posted against it |
+| `GET /v1/upgrades` | admin | What players built, tallied by outcome |
 | `POST /v1/reports` | ingest | Take a report |
 | `GET /v1/reports` | admin | List, newest first; paged by cursor |
 | `GET /v1/reports/:id` | admin | One report, in full, with its log |

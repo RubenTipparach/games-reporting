@@ -111,6 +111,25 @@ pre {
 .err { color: var(--crash); }
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
 .more { display: flex; gap: 10px; align-items: center; margin: 14px 0 0; }
+/* The upgrade tally. One row per upgrade: a stacked bar whose LENGTH is how
+   many runs took it and whose segments are how those runs ended. */
+.up-row { display: grid; grid-template-columns: 170px 1fr auto; gap: 12px; align-items: center; }
+.up-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-track { display: flex; height: 17px; background: #10151c; border: 1px solid var(--line);
+            border-radius: 2px; overflow: hidden; }
+/* A 2px gap of surface between segments. Succeeded and failed are only dE 7.2
+   apart under deuteranopia, so the boundary cannot be carried by hue alone -
+   the gap, the counts printed beside the bar and the legend all restate it. */
+.up-seg + .up-seg { margin-left: 2px; }
+.up-seg-succeeded { background: #6fd08c; }
+.up-seg-failed    { background: var(--crash); }
+.up-seg-died      { background: #a83a32; }
+.up-seg-quit      { background: var(--warn); }
+.up-tail { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
+.legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.never { margin-top: 14px; }
 `;
 
 // Kept as a plain function so the page is one file. It is only ever inserted
@@ -179,7 +198,11 @@ function gate(msg) {
 // 'session' and 'mode' are the two drill-down steps. Empty means "not drilled
 // in yet", so the same view renders all three levels and a crumb just clears
 // one of them.
-const state = { view: "signatures", game: "", signature: "", report: null, session: "", mode: "" };
+const state = {
+  view: "signatures", game: "", signature: "", report: null, session: "", mode: "",
+  // Which sector the upgrade tally is narrowed to. Empty is all of them.
+  sector: "",
+};
 
 // Whether a game name is one the service carries an entry for. A registered
 // game gets a path of its own; anything else - a CI fixture, a game nobody has
@@ -203,6 +226,7 @@ function href(s) {
   const seg = encodeURIComponent;
   let path;
   if (s.report) path = "/reports/" + seg(s.report);
+  else if (s.view === "upgrades") path = "/upgrades";
   else if (s.view === "runs") {
     path = "/sessions" +
       (s.session ? "/" + seg(s.session) : "") +
@@ -210,8 +234,14 @@ function href(s) {
   } else if (s.signature) path = "/issues/" + seg(s.signature);
   else if (s.view === "reports") path = "/reports";
   else path = "/issues";
-  if (s.game && registered(s.game)) return "/" + seg(s.game) + path;
-  return path + (s.game ? "?game=" + seg(s.game) : "");
+  // The sector narrows the tally, and it is a filter rather than a place, so
+  // it stays a query. A link to it still opens on the same screenful.
+  const query = new URLSearchParams();
+  if (s.game && !registered(s.game)) query.set("game", s.game);
+  if (s.view === "upgrades" && s.sector) query.set("sector", s.sector);
+  const tail = query.toString() ? "?" + query.toString() : "";
+  if (s.game && registered(s.game)) return "/" + seg(s.game) + path + tail;
+  return path + tail;
 }
 
 // A link to one view, from where we are now. The game filter rides along
@@ -219,7 +249,7 @@ function href(s) {
 // up reading another game's reports without noticing.
 function to(patch) {
   return href(Object.assign(
-    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "" },
+    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "", sector: "" },
     patch));
 }
 
@@ -231,10 +261,12 @@ function readUrl() {
   try {
     parts = location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
   } catch (e) { void e; } // a hand-mangled %-escape just lands on the default view
+  const params = new URLSearchParams(location.search);
   const next = {
     view: "signatures",
-    game: new URLSearchParams(location.search).get("game") || "",
+    game: params.get("game") || "",
     signature: "", report: null, session: "", mode: "",
+    sector: params.get("sector") || "",
   };
   // A leading segment naming a registered game is the game, and the rest of
   // the path is read exactly as it would be without it. One shift, and every
@@ -252,6 +284,8 @@ function readUrl() {
     // A mode with no session to hang it on is not a view; it would render the
     // whole session list under a filter nothing shows.
     next.mode = next.session ? (parts[2] || "") : "";
+  } else if (parts[0] === "upgrades") {
+    next.view = "upgrades";
   } else if (parts[0] === "issues" && parts[1]) {
     next.view = "reports";
     next.signature = parts[1];
@@ -294,6 +328,7 @@ addEventListener("popstate", () => { readUrl(); render(); });
 function pageTitle() {
   const short = (v) => String(v).slice(0, 12);
   if (state.report) return "Report " + short(state.report);
+  if (state.view === "upgrades") return "Upgrades";
   if (state.view === "runs") return state.session ? "Session " + short(state.session) : "Sessions";
   if (state.signature) return "Issue " + short(state.signature);
   if (state.view === "reports") return "Reports";
@@ -339,6 +374,9 @@ function toolbar() {
     nav("Issues", { view: "signatures" }, state.view === "signatures" || !!state.signature) +
     nav("All reports", { view: "reports" }, onReports || !!state.report) +
     nav("Sessions", { view: "runs" }, state.view === "runs") +
+    // Only for a game whose entry names an upgrades path: a tab that opens on
+    // "this game has no upgrades" is a tab nobody should have been offered.
+    (hasUpgrades() ? nav("Upgrades", { view: "upgrades" }, state.view === "upgrades") : "") +
     gamePicker() +
     '<span class="spacer"></span>' +
     '<span class="dim" id="status"></span>' +
@@ -365,6 +403,13 @@ function toolbar() {
 // A game with reports but no entry keeps its place in the list rather than
 // disappearing, since it is still readable and the point of showing it is that
 // somebody may want to write it an entry.
+// Whether the chosen game has a build worth tallying. With no game chosen the
+// tally has no single path to read, so the tab waits until one is.
+function hasUpgrades() {
+  const e = entryFor(state.game);
+  return !!(e && e.upgrades && e.upgrades.path);
+}
+
 function gamePicker() {
   const options = ['<option value="">all games</option>'];
   for (const g of GAMES) {
@@ -471,6 +516,105 @@ async function loadMore(btn) {
     btn.remove();
   }
   countShown();
+}
+
+// ---------------------------------------------------------------------------
+// WHAT PLAYERS BUILT.
+//
+// One row per upgrade. The bar's LENGTH is how many runs took it, so the list
+// reads top to bottom as most-taken first; its SEGMENTS are how those runs
+// ended, so a long bar that is mostly red is a popular pick that is not
+// working. Both questions at once, which is the point: either alone is a
+// number somebody has to hold in their head while they read the other.
+//
+// Scaled against the most-taken upgrade rather than against the run count,
+// because the question is which picks beat which other picks. Against the run
+// total every bar would be short and the comparison would be between slivers.
+//
+// The outcome colours are the portal's status colours, and succeeded/failed
+// are only dE 7.2 apart under deuteranopia - inside the band that is legal
+// ONLY with a second encoding. So the counts are printed beside every bar, the
+// segments are separated by 2px of surface, and the legend names each colour.
+// Nobody has to tell green from red to read this.
+const OUTCOMES = ["succeeded", "failed", "died", "quit"];
+
+function upgradeLegend() {
+  return '<p class="legend">' + OUTCOMES.map((o) =>
+    '<span><i class="up-seg-' + o + '"></i>' + esc(o) + '</span>').join("") + '</p>';
+}
+
+async function viewUpgrades() {
+  const q = new URLSearchParams();
+  if (state.game) q.set("game", state.game);
+  if (state.sector) q.set("sector", state.sector);
+  const body = await api("/v1/upgrades?" + q.toString());
+
+  if (!body.upgrades) {
+    return '<div class="empty">This game has no upgrades in its registry entry.' +
+      '<br><span class="dim">Add an <code>upgrades</code> path to its entry in src/games.js ' +
+      'and this page draws itself.</span></div>';
+  }
+  if (!body.runs) {
+    return sectorChips(body.sectors) +
+      '<div class="empty">No finished run has carried a build yet.' +
+      '<br><span class="dim">The tally is over run summaries, so it fills in as runs end.</span></div>';
+  }
+
+  const most = Math.max(1, ...body.taken.map((u) => u.runs));
+  const rows = body.taken.map((u) => {
+    const cleared = u.succeeded;
+    // A share needs a denominator worth dividing by. One run that cleared is
+    // not a 100% clear rate, it is one run, and printing the percentage is how
+    // a page invents a finding out of a single player's afternoon.
+    const pct = u.runs >= 3 ? Math.round((cleared / u.runs) * 100) : null;
+    const seg = (o) => u[o]
+      ? '<span class="up-seg up-seg-' + o + '" style="width:' +
+        (u[o] / most * 100) + '%" title="' + u[o] + ' ' + esc(o) + '"></span>'
+      : "";
+    return '<div class="up-row">' +
+      '<span class="up-name" title="' + esc(u.upgrade) + '">' + esc(u.upgrade) + '</span>' +
+      '<span class="up-track">' + OUTCOMES.map(seg).join("") + '</span>' +
+      '<span class="up-tail dim">' + u.runs + ' run' + (u.runs === 1 ? "" : "s") +
+        ' &middot; <span class="' + (cleared ? "outcome-succeeded" : "dim") + '">' +
+        cleared + ' cleared</span>' +
+        (pct === null ? '' : ' <span class="dim">' + pct + '%</span>') +
+        ' &middot; ' + esc(body.upgrades.unit || "lvl") + ' ' + median(u.levels) +
+      '</span></div>';
+  }).join("");
+
+  const never = body.never.length
+    ? '<div class="card never"><h2>Never taken</h2>' +
+      '<p class="dim">Present in the build every run reports, and picked in none of them. ' +
+      'The loudest thing this page has to say, and invisible if it only listed what was.</p>' +
+      '<p>' + body.never.map((n) => '<span class="dim">' + esc(n) + '</span>').join(" &middot; ") +
+      '</p></div>'
+    : "";
+
+  return sectorChips(body.sectors) +
+    '<div class="card"><h2>' + esc(body.upgrades.title || "Upgrades") +
+      ' <span class="dim">across ' + body.runs + ' run' + (body.runs === 1 ? "" : "s") +
+      (state.sector ? ' in ' + esc(state.sector) : '') + '</span></h2>' +
+    upgradeLegend() + rows + '</div>' + never;
+}
+
+// The sectors runs happened in, as filters. Same idiom as the mode chips on a
+// session, and only drawn when there is a choice to make.
+function sectorChips(sectors) {
+  if (!sectors || sectors.length < 2) return "";
+  const chip = (label, sector, on) =>
+    '<a class="btn mode' + (on ? " on" : "") + '" href="' +
+    esc(to({ view: "upgrades", sector })) + '">' + esc(label) + '</a>';
+  return '<p class="dim">Sector: ' + chip("all", "", !state.sector) + " " +
+    sectors.map((s) => chip(s, s, state.sector === s)).join(" ") + '</p>';
+}
+
+// The middle of a handful of runs, which is what the tally hands back a list
+// for: an average is dragged around by one player who took a thing to five.
+function median(xs) {
+  const v = [...xs].sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
 }
 
 async function viewSignatures() {
@@ -934,6 +1078,7 @@ async function render() {
   app.innerHTML = '<div class="empty">Loading...</div>';
   try {
     if (state.report) app.innerHTML = await viewReport(state.report);
+    else if (state.view === "upgrades") app.innerHTML = await viewUpgrades();
     else if (state.view === "runs") app.innerHTML = await viewRuns();
     else if (state.view === "reports" || state.signature) app.innerHTML = await viewReports();
     else app.innerHTML = await viewSignatures();

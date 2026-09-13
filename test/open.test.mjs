@@ -23,7 +23,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
-const { registryForPage, GAMES: REGISTRY } = await import("../src/games.js");
+const { registryForPage, upgradePathFor, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -332,6 +332,102 @@ test("the window comes from config, so it can follow the game's interval", async
   // Everything in this fixture was inserted at a fixed instant in 2027, so by
   // a real clock it is either far future or long silent - never mid-window.
   assert.ok(row.live === 0 || row.live === 1);
+});
+
+// ---------------------------------------------------------------------------
+// What players built.
+//
+// The tally reads a path the GAME'S ENTRY names, so these assert the registry
+// is what drives it and not a hardcoded "mech.upgrades" somewhere.
+
+const BUILDS = "builds-fixture";
+
+test("the tally counts a run per upgrade, split by how the run ended", () => {
+  let n = 0;
+  const run = (outcome, sector, upgrades) => store.insert({
+    id: `build-${n++}`, received_at: 1_900_000_000_000 + n, game: BUILDS,
+    version: "", kind: "run", signature: "sig", title: outcome, message: outcome,
+    stack: "", log: "", platform: "", gpu: "", engine: "", session: "b", player: "",
+    context: JSON.stringify({ outcome, sector_title: sector, mech: { upgrades } }),
+  });
+  // armor is taken in three runs and clears one; shotgun in one and clears
+  // none; missiles is present in every build and picked by nobody.
+  run("succeeded", "Meridian", { armor: 2, shotgun: 0, missiles: 0 });
+  run("failed", "Meridian", { armor: 1, shotgun: 0, missiles: 0 });
+  run("failed", "Dust Hive", { armor: 3, shotgun: 1, missiles: 0 });
+  run("quit", "Dust Hive", { armor: 0, shotgun: 0, missiles: 0 });
+
+  const t = store.upgradeTally({ game: BUILDS, path: "mech.upgrades" });
+  assert.equal(t.runs, 4, "every run that carried a build counts, even an empty one");
+
+  const armor = t.taken.find((u) => u.upgrade === "armor");
+  assert.equal(armor.runs, 3, "three runs took armor");
+  assert.equal(armor.succeeded, 1);
+  assert.equal(armor.failed, 2);
+  assert.deepEqual(armor.levels.sort(), [1, 2, 3], "and the levels it was taken at");
+
+  const shotgun = t.taken.find((u) => u.upgrade === "shotgun");
+  assert.equal(shotgun.runs, 1);
+  assert.equal(shotgun.succeeded, 0);
+
+  assert.deepEqual(t.never, ["missiles"],
+    "an upgrade present in every build and picked in none is named, not dropped");
+  assert.equal(t.taken[0].upgrade, "armor", "most taken first");
+});
+
+test("the tally narrows to one place", () => {
+  const t = store.upgradeTally({ game: BUILDS, path: "mech.upgrades", sector: "Meridian" });
+  assert.equal(t.runs, 2, "only the runs in that sector");
+  const armor = t.taken.find((u) => u.upgrade === "armor");
+  assert.equal(armor.runs, 2);
+  assert.equal(armor.succeeded, 1);
+  assert.deepEqual(store.runPlaces({ game: BUILDS }).sort(), ["Dust Hive", "Meridian"]);
+});
+
+test("the path comes from the registry, so another game's word for it works too", () => {
+  // The same rows read through a DIFFERENT path return nothing, which is the
+  // proof that the path is doing the work rather than a hardcoded key.
+  const wrong = store.upgradeTally({ game: BUILDS, path: "mech.perks" });
+  assert.equal(wrong.taken.length, 0);
+  assert.equal(wrong.runs, 0);
+
+  // And a game with no entry at all has no path to read.
+  assert.equal(upgradePathFor("not-a-game"), null);
+  assert.equal(upgradePathFor("mining-mike"), "mech.upgrades");
+});
+
+test("a game with no upgrades entry gets an empty tally rather than an error", async () => {
+  const res = await fetch(`${base}/v1/upgrades?game=${BUILDS}`);
+  assert.equal(res.status, 200, "not a 404: the game is real, it just has no entry");
+  const body = await res.json();
+  assert.equal(body.upgrades, null, "and the page knows to say so");
+  assert.deepEqual(body.taken, []);
+});
+
+test("the route serves the tally for a game whose entry names the path", async () => {
+  const res = await fetch(`${base}/v1/upgrades?game=mining-mike`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.upgrades.path, "mech.upgrades", "carrying the entry it read");
+  assert.ok(Array.isArray(body.taken));
+  assert.ok(Array.isArray(body.sectors));
+});
+
+test("the upgrades page has an address of its own, per game", async () => {
+  for (const path of ["/mining-mike/upgrades", "/upgrades"]) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200, `${path} should serve the portal`);
+  }
+  const { state, href } = router("/mining-mike/upgrades");
+  assert.equal(state.view, "upgrades");
+  assert.equal(state.game, "mining-mike");
+  assert.equal(href(state), "/mining-mike/upgrades");
+
+  // The sector is a filter, so it stays a query, and a link to it still opens
+  // on the same screenful.
+  const filtered = router("/mining-mike/upgrades", "?sector=The%20Long%20Haul");
+  assert.equal(filtered.state.sector, "The Long Haul");
+  assert.equal(filtered.href(filtered.state), "/mining-mike/upgrades?sector=The+Long+Haul");
 });
 
 // ---------------------------------------------------------------------------

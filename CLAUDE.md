@@ -44,6 +44,7 @@ for every game and the registry says nothing about them:
 | `place.depth` | the context key indexing how deep into it |
 | `place.wavesPerDepth` | how much of one counts as finishing it |
 | `blocks` | which of the game's own context keys are worth a line |
+| `upgrades.path` | the context path holding what a player built, name to level |
 
 ## Adding a game
 
@@ -85,6 +86,24 @@ could hold functions could not be handed to the thing that draws it.
 If a game needs a row shape this grammar cannot express, **add the shape to
 the grammar** in `rowPairs()`. Do not add a branch for the game.
 
+## Charts
+
+Two decisions the portal's charts already made, both worth keeping:
+
+- **Succeeded green and failed red are only dE 7.2 apart under deuteranopia.**
+  That is inside the band a validator passes ONLY with a second encoding, so
+  every outcome bar prints its counts beside it, separates its segments with
+  2px of surface, and carries a legend. Never ship an outcome split that leans
+  on hue alone. The check is runnable, so run it rather than reasoning about
+  it.
+- **A share needs a denominator worth dividing by.** One run that cleared is
+  not a 100% clear rate. The upgrade tally prints a percentage only at three
+  runs or more; below that the raw count speaks for itself.
+
+And the step everybody skips: **render it and look at it**. The first draft of
+the upgrade tally clipped its right-hand column at 1200px wide, which no test
+would have caught and one screenshot did.
+
 ## Addresses are the product
 
 Every view has an address and a game is a path segment, because the thing
@@ -94,6 +113,7 @@ somebody does with this service is paste a link at somebody else:
 /mining-mike/issues            /mining-mike/issues/<signature>
 /mining-mike/reports           /mining-mike/reports/<id>
 /mining-mike/sessions          /mining-mike/sessions/<session>/<mode>
+/mining-mike/upgrades          ?sector=<name> narrows it
 /issues                        the same pages across every game
 ```
 

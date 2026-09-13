@@ -375,6 +375,91 @@ export function openDatabase(dataDir) {
         .all(args);
     },
 
+    // WHAT PLAYERS BUILT, tallied across runs.
+    //
+    // The upgrades live in the context as a map of name to level, at a path the
+    // GAME'S REGISTRY ENTRY names - so this counts Mining Mike's mech upgrades
+    // and would count another game's perks without a line changing. json_each
+    // walks the map, which is what lets a set of upgrades nobody enumerated in
+    // advance be grouped at all.
+    //
+    // A row per upgrade, the outcomes of the runs that took it, and every level
+    // it was taken at. Levels come back as a list rather than an average
+    // because the median is the honest middle of a handful of runs and SQLite
+    // has no median function; the caller takes it.
+    upgradeTally({ game, path, sector, depth }) {
+      if (!game || !path) return { runs: 0, taken: [], never: [] };
+      const json = "$." + path;
+      const args = { game, json };
+      let filter = "WHERE r.kind = 'run' AND r.game = @game";
+      if (sector) {
+        filter += " AND json_extract(r.context, '$.sector_title') = @sector";
+        args.sector = sector;
+      }
+      if (depth !== undefined && depth !== null && depth !== "") {
+        filter += " AND json_extract(r.context, '$.depth') = @depth";
+        args.depth = Number(depth);
+      }
+
+      // Runs that carried a build at all, which is the denominator. A run
+      // reported before the game started sending them is not a run where
+      // nobody took anything.
+      const runs = db.prepare(`
+        SELECT COUNT(*) AS n FROM reports r
+        ${filter} AND json_extract(r.context, @json) IS NOT NULL
+      `).get(args).n;
+
+      const rows = db.prepare(`
+        SELECT u.key AS upgrade,
+               COUNT(*) AS runs,
+               SUM(CASE WHEN json_extract(r.context, '$.outcome') = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+               SUM(CASE WHEN json_extract(r.context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN json_extract(r.context, '$.outcome') = 'died'      THEN 1 ELSE 0 END) AS died,
+               SUM(CASE WHEN json_extract(r.context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
+               GROUP_CONCAT(u.value) AS levels
+        FROM reports r, json_each(json_extract(r.context, @json)) u
+        ${filter} AND u.value > 0
+        GROUP BY u.key
+        ORDER BY runs DESC, u.key
+      `).all(args);
+
+      // Every name the game has ever mentioned, so the ones NOBODY took can be
+      // named. An upgrade that is never picked is the loudest thing this page
+      // has to say, and it is invisible if the page only lists what was.
+      const known = db.prepare(`
+        SELECT DISTINCT u.key AS upgrade
+        FROM reports r, json_each(json_extract(r.context, @json)) u
+        ${filter}
+      `).all(args).map((r) => r.upgrade);
+
+      const taken = new Set(rows.map((r) => r.upgrade));
+      return {
+        runs,
+        taken: rows.map((r) => ({
+          upgrade: r.upgrade,
+          runs: r.runs,
+          succeeded: r.succeeded,
+          failed: r.failed,
+          died: r.died,
+          quit: r.quit,
+          levels: String(r.levels || "").split(",").filter(Boolean).map(Number),
+        })),
+        never: known.filter((k) => !taken.has(k)).sort(),
+      };
+    },
+
+    // The places runs happened, for the filter chips above the tally.
+    runPlaces({ game }) {
+      if (!game) return [];
+      return db.prepare(`
+        SELECT DISTINCT json_extract(context, '$.sector_title') AS sector
+        FROM reports
+        WHERE kind = 'run' AND game = @game
+          AND json_extract(context, '$.sector_title') IS NOT NULL
+        ORDER BY sector
+      `).all({ game }).map((r) => r.sector);
+    },
+
     // Which games have actually posted, and how much. The registry says what
     // this service KNOWS about; this says what has turned up, and the gap
     // between the two is the list of games somebody should add an entry for.

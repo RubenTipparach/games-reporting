@@ -63,6 +63,16 @@ export const GAMES = [
       wavesPerDepth: 10,
     },
 
+    // WHAT A PLAYER BUILT, as a map of name to level somewhere in the context.
+    // The upgrade view reads this path and nothing else: a game whose entry
+    // leaves it out has no upgrade view, and a game that calls them perks
+    // points at "perks" and gets the same page.
+    //
+    // Snapshot rather than a timeline, because that is what arrives: the run
+    // summary carries the levels a player ENDED on. Which upgrade was taken at
+    // which wave is a different report and is not being sent yet.
+    upgrades: { path: "mech.upgrades", title: "Upgrades", unit: "lvl" },
+
     // Context blocks, drawn after the generic Session one and before the
     // generic Machine one. `when` is the test for drawing the block at all:
     // any one of these keys present is enough.
@@ -134,5 +144,25 @@ export function isGameId(segment) {
 // routes here and the drawing there - because two copies of "what does this
 // game call a depth" is how they end up disagreeing.
 export function registryForPage() {
-  return GAMES.map((g) => ({ id: g.id, title: g.title, place: g.place, blocks: g.blocks }));
+  return GAMES.map((g) => ({
+    id: g.id, title: g.title, place: g.place, blocks: g.blocks, upgrades: g.upgrades,
+  }));
+}
+
+// A context path is spliced into SQL as a JSON path, so it has to be a path and
+// not an expression. These come from the file above rather than from a request,
+// but "it is our own data" is how the first injection in every codebase gets
+// written, and the check costs one line.
+const PATH_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+
+export function upgradePathFor(id) {
+  const g = gameById(id);
+  const path = g && g.upgrades && g.upgrades.path;
+  if (!path) return null;
+  if (!PATH_SHAPE.test(path)) throw new Error(`upgrades.path ${path} is not a context path`);
+  return path;
+}
+
+for (const g of GAMES) {
+  if (g.upgrades) upgradePathFor(g.id);
 }

@@ -6,7 +6,7 @@ import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
 import { adminPage } from "./admin.js";
-import { GAMES, isGameId } from "./games.js";
+import { GAMES, isGameId, upgradePathFor } from "./games.js";
 
 const store = openDatabase(config.dataDir);
 const idSalt = loadSalt(config.dataDir);
@@ -230,6 +230,7 @@ const PAGE_ROUTES = [
   /^\/issues(?:\/[^/]+)?$/,
   /^\/reports(?:\/[^/]+)?$/,
   /^\/sessions(?:\/[^/]+){0,2}$/,
+  /^\/upgrades$/,
 ];
 
 function isPagePath(path) {
@@ -347,6 +348,33 @@ function handleRequest(req, res, url) {
     // is the signature itself.
     const next = nextCursor(signatures, limit, "last_seen", "signature");
     return send(res, 200, next ? { signatures, next } : { signatures });
+  }
+
+  // What players built, tallied across runs. The upgrades are read from the
+  // path the GAME'S OWN ENTRY names, so this route is not Mining Mike's: a
+  // game whose entry has no upgrades path gets an empty tally and a portal
+  // with no upgrades tab, rather than a 404 nobody can act on.
+  if (path === "/v1/upgrades" && req.method === "GET") {
+    if (!requireKey(req, res)) return undefined;
+    const q = url.searchParams;
+    const game = q.get("game") || "";
+    const upgradePath = game ? upgradePathFor(game) : null;
+    if (!upgradePath) {
+      return send(res, 200, { game, upgrades: null, runs: 0, taken: [], never: [], sectors: [] });
+    }
+    const tally = store.upgradeTally({
+      game,
+      path: upgradePath,
+      sector: q.get("sector") || undefined,
+      depth: q.get("depth") || undefined,
+    });
+    const entry = GAMES.find((g) => g.id === game);
+    return send(res, 200, {
+      game,
+      upgrades: entry.upgrades,
+      sectors: store.runPlaces({ game }),
+      ...tally,
+    });
   }
 
   // Runs are their own listing, not a filter on the fault list, because the
