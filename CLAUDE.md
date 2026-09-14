@@ -48,6 +48,7 @@ for every game and the registry says nothing about them:
 | `upgrades.meta` | what the game calls each of those, and what taking one does |
 | `upgrades.icons` | where that game's art lives, one `<key>.png` per upgrade |
 | `upgrades.picks` | where a run keeps the ORDER they were taken in, and what its entries call their fields |
+| `stats` | where a run keeps the mech at BOTH ends of it, and which of those figures share a unit |
 
 ## Adding a game
 
@@ -127,6 +128,29 @@ a second copy of a number it already sends.
 
 A game that sends no such list has no timeline and still has the tally, which
 is every game until its reporter learns to send one.
+
+### Before and after
+
+`stats` is the same readout twice, as the mech dropped in and as it finished.
+The end ALONE is a number with nothing to divide by: 214 DPS is a run that
+tripled its damage or a run that dropped in at 200 and wasted twenty minutes,
+and only the pair can tell you which.
+
+Two rules the card keeps:
+
+- **A shared axis needs a shared unit.** `axis` is the figures that may be
+  drawn on one scale and `rows` is everything else. Three quantities of
+  different kinds on one axis is a chart that lies about all three, so the
+  entry NAMES the unit rather than the check assuming one, and `checkStats()`
+  refuses an axis without it.
+- **Round once, then subtract.** The first draft rounded for display and
+  subtracted the raw values, so a card read "53 to 310" beside "+256.6" and
+  the subtraction did not come out for anybody who tried it. Every figure on
+  that card goes through `statRound()`, the arithmetic included.
+
+A run carrying only one end still draws, and says which end it is. A missing
+start is never filled in from the end: that would read as a run that changed
+nothing, which is a finding, and inventing one is worse than admitting the gap.
 
 ## Charts
 

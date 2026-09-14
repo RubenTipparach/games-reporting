@@ -305,6 +305,35 @@ and the service looks up where that game keeps its picks. Asking for every
 game's runs at once (`/v1/runs` with no `game`) leaves the column out
 entirely, because "where are the picks" has a different answer per game.
 
+### What the run did to the mech
+
+The game reports its own MECH DATA readout twice, as the mech dropped in and
+as it finished, and the run report draws the difference: a headline figure
+(DPS on target), a dumbbell for the figures that share its unit, and a plain
+pair per row for everything that does not.
+
+The end on its own is a number with nothing to divide by. 214 DPS is a run
+that tripled its damage or a run that dropped in at 200 and wasted twenty
+minutes, and only the pair tells you which.
+
+```js
+stats: {
+  path: "mech.stats", before: "start", after: "end",
+  lead: "dps",
+  axis: { unit: "dps", rows: [["dps", "on target"], ["dps_around", "around it"]] },
+  rows: [["hull", "hull"], ["interval", "interval", "s"], ["crit_chance", "crit chance", "pct"]],
+}
+```
+
+`axis` and `rows` are separate because **a shared scale is a claim**. Putting
+an interval and a reach on a DPS axis draws a dot at zero and a dot off the
+end, and neither means anything, so the entry names the unit rather than the
+page assuming one.
+
+A run that carried only one end still draws and says so. The start is never
+filled in from the end: that reads as a run that changed nothing, which is
+itself a finding, and inventing one is worse than showing the gap.
+
 ### Is a session still running?
 
 Nothing can report its own end. A clean quit is the process leaving and a crash

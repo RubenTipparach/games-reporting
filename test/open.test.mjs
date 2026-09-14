@@ -24,7 +24,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
-const { registryForPage, upgradePathFor, checkUpgrades, GAMES: REGISTRY } = await import("../src/games.js");
+const { registryForPage, upgradePathFor, checkUpgrades, checkStats, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -716,7 +716,8 @@ function router(pathname, search = "") {
     "addEventListener", "setTimeout", "GAMES",
     src + "\n;return { state, href, to, readUrl, GAMES," +
       " effectAt, upgradeName, upgradeArt, upgradeTip," +
-      " picksOf, buildOrder, pickTip, runPlace };",
+      " picksOf, buildOrder, pickTip, runPlace," +
+      " statsCard, statPair, statPlot, statRows, statChange, statValue };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -1262,4 +1263,142 @@ test("a half-filled picks entry is refused at import", () => {
   assert.doesNotThrow(bad({ path: "p", key: "key", at: "at_sec" }));
   // The wave is genuinely optional: a game with no waves still has an order.
   assert.doesNotThrow(bad({ path: "p", key: "key", at: "at_sec", wave: "wave" }));
+});
+
+// ---------------------------------------------------------------------------
+// Before and after: what the run did to the mech.
+//
+// The end alone is a number with nothing to divide by. These check that the
+// card subtracts rather than derives, that a shared axis is only ever drawn
+// over a shared unit, and that half a pair is never dressed up as a whole one.
+
+function statsFixture(over = {}) {
+  const end = {
+    dps: 310, dps_around: 32.8, dps_air: 0,
+    damage: 17, shots: 2, interval: 0.27, crit_chance: 0.1, pierce: 1,
+    burn_dps: 0, slow: 0.3, chain: 2, hull: 225, speed: 390, reach: 800,
+    level: 8, chassis: "Generalist", weapon: "Blaster",
+  };
+  const start = {
+    dps: 53, dps_around: 0, dps_air: 0,
+    damage: 8, shots: 1, interval: 0.42, crit_chance: 0, pierce: 0,
+    burn_dps: 0, slow: 0, chain: 0, hull: 100, speed: 320, reach: 600,
+    level: 1, chassis: "Generalist", weapon: "Blaster",
+  };
+  return { mech: { stats: { start, end, ...over } } };
+}
+
+test("the card leads with the change, not with the end", () => {
+  const { statsCard } = portal();
+  const html = statsCard(statsFixture(), "mining-mike");
+  assert.match(html, /53/, "what it dropped in with");
+  assert.match(html, /310/, "what it finished as");
+  assert.match(html, /\+257/, "and the difference, which is the point");
+  assert.match(html, /5\.8 times over/);
+  // Never colour alone: the direction is a word as well as a sign.
+  assert.match(html, /gained/);
+});
+
+test("a rise from nothing has no multiple", () => {
+  const { statChange } = portal();
+  // Dividing by zero produces infinity, which is not a finding.
+  assert.equal(statChange(0, 63).times, null);
+  assert.equal(statChange(0, 63).diff, 63);
+  assert.equal(statChange(53, 310).times, 5.8);
+  assert.equal(statChange(200, 100).diff, -100);
+  assert.equal(statChange(200, 100).down, true);
+  assert.equal(statChange("x", 3), null, "a figure that is not a number has no change");
+
+  // The difference is between the numbers PRINTED, not between the raw ones.
+  // The first draft rounded 309.6 to 310 for display and subtracted 309.6, so
+  // a card read "53 to 310" beside "+256.6" and the subtraction did not come
+  // out for anybody who tried it.
+  const { statValue } = portal();
+  assert.equal(statValue(309.6), "310");
+  assert.equal(statChange(53, 309.6).diff, 257, "310 minus 53, which is what the card shows");
+});
+
+test("the dumbbell puts every figure on the one scale its unit earns", () => {
+  const { statPlot } = portal();
+  const spec = REGISTRY.find((g) => g.id === "mining-mike").stats;
+  const { mech } = statsFixture();
+  const html = statPlot(spec, mech.stats.start, mech.stats.end);
+  // 310 is the largest figure across BOTH ends, so it is the full width and
+  // everything else is drawn against it. A per-row scale would draw
+  // "0 to 32.8" and "53 to 310" the same length, which is the lie.
+  assert.match(html, /ba-after" style="left:100%/);
+  const around = html.slice(html.indexOf("around it"));
+  assert.match(around, /ba-after" style="left:10\.5/, "32.8 of 310 is a tenth of the track");
+  // Both numbers printed beside every row, so nobody has to tell two blues
+  // apart to read it.
+  assert.match(html, /53 <span class="ba-arrow">&rarr;<\/span> <b>310<\/b>/);
+});
+
+test("a figure with no unit to share never gets on the axis", () => {
+  const { statPlot } = portal();
+  const spec = REGISTRY.find((g) => g.id === "mining-mike").stats;
+  const { mech } = statsFixture();
+  const html = statPlot(spec, mech.stats.start, mech.stats.end);
+  // interval is 0.27 seconds and reach is 800 pixels. On a DPS axis they are
+  // a dot at zero and a dot off the end, and both would be nonsense.
+  assert.ok(!/interval/.test(html));
+  assert.ok(!/reach/.test(html));
+  // They are rows instead, which claim no scale at all.
+  const { statRows } = portal();
+  const rows = statRows(spec, mech.stats.start, mech.stats.end);
+  assert.match(rows, /0\.42s <span class="ba-arrow">&rarr;<\/span> 0\.27s/);
+  assert.match(rows, /600px <span class="ba-arrow">&rarr;<\/span> 800px/);
+  assert.match(rows, /0% <span class="ba-arrow">&rarr;<\/span> 10%/, "a fraction reads as a percentage");
+});
+
+test("a figure the run did not move says so rather than vanishing", () => {
+  const { statRows } = portal();
+  const spec = REGISTRY.find((g) => g.id === "mining-mike").stats;
+  const { mech } = statsFixture();
+  const rows = statRows(spec, mech.stats.start, mech.stats.end);
+  // "nothing changed" is an answer; a missing row is not.
+  assert.match(rows, /ba-cell ba-same/);
+  assert.match(rows, /burn dps/);
+  assert.match(rows, /Generalist/, "and a chassis that stayed put prints once");
+  assert.ok(!/Generalist <span class="ba-arrow">/.test(rows), "not as a change to itself");
+});
+
+test("half a pair is not dressed up as a whole one", () => {
+  const { statsCard, statPair } = portal();
+  const spec = REGISTRY.find((g) => g.id === "mining-mike").stats;
+  const { mech } = statsFixture();
+
+  // A run from a build that only reported the end. The card still draws, and
+  // says what it is missing rather than inventing a start equal to the end,
+  // which would read as a run that changed nothing.
+  const onlyEnd = { mech: { stats: { end: mech.stats.end } } };
+  const html = statsCard(onlyEnd, "mining-mike");
+  assert.match(html, /310/);
+  assert.match(html, /only the mech it finished as/);
+  assert.ok(!/\+/.test(html.slice(html.indexOf("ba-delta"))) || !/ba-delta/.test(html),
+    "no delta without something to subtract");
+  assert.ok(!/as it dropped in/.test(html), "and no legend for a mark it does not draw");
+
+  // No end at all is not a before-and-after in any sense.
+  assert.equal(statPair({ mech: { stats: { start: mech.stats.start } } }, "mining-mike"), null);
+  assert.equal(statPair({ mech: {} }, "mining-mike"), null);
+  assert.equal(statsCard({ mech: {} }, "mining-mike"), "");
+  // And a game whose entry describes no such readout draws nothing.
+  assert.equal(statPair(mech, "no-such-game"), null);
+});
+
+test("an axis that claims a shared scale has to name the unit", () => {
+  const base = { path: "mech.stats", before: "start", after: "end" };
+  const bad = (over) => () => checkStats({ id: "x", stats: { ...base, ...over } });
+  // Three quantities of different kinds on one scale is a chart that lies
+  // about all three, and the unit is how an entry says it meant the claim.
+  assert.throws(bad({ axis: { rows: [["dps", "on target"]] } }), /no unit/);
+  assert.throws(bad({ axis: { unit: "dps" } }), /no rows/);
+  assert.throws(bad({ lead: "dps" }), /needs an axis/);
+  assert.throws(bad({ unit: "dps", lead: "dps", axis: { unit: "dps", rows: [["hull", "hull"]] } }),
+    /not one of the figures on the axis/);
+  assert.throws(bad({ before: "end" }), /the same key/);
+  assert.throws(bad({ path: "a-b" }), /not a context path/);
+  assert.doesNotThrow(bad({ lead: "dps", axis: { unit: "dps", rows: [["dps", "on target"]] } }));
+  assert.doesNotThrow(() => checkStats({ id: "x" }), "a game with no such readout is fine");
 });
