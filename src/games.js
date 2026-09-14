@@ -96,6 +96,59 @@ export const GAMES = [
     // `icons` is a directory holding <key>.png. `icon: false` is an upgrade the
     // game has no art for yet, and draws as a lettered tile rather than as a
     // broken image - the same thing the game itself does with it.
+    // WHAT THE BUILD ADDED UP TO, at both ends of the run.
+    //
+    // The upgrade counts say what got bought. They do not say what it amounted
+    // to: a chassis multiplies damage and fire rate, a salvaged weapon raises a
+    // tier, and research adds flat damage under both. The game works all of
+    // that out for its own MECH DATA panel and reports the answer twice, as the
+    // mech deployed and as it finished, so the portal subtracts rather than
+    // derives.
+    //
+    //   path    where the pair lives
+    //   before  the key holding the mech as it dropped in
+    //   after   the key holding the mech as it finished
+    //   lead    the ONE figure the card is built around
+    //   axis    figures sharing a unit, so they can share one scale
+    //   rows    everything else, each as its own before and after
+    //
+    // A row is [key, label] and optionally a format, which is one of:
+    //
+    //   "pct"          a fraction, printed as a percentage
+    //   anything else  a unit, printed after the number
+    //
+    // `lead` and `axis` are separate from `rows` because a shared scale is a
+    // claim: three numbers on one axis say they are comparable, and DPS and
+    // seconds are not. A game that puts an interval in `axis` gets a chart that
+    // lies, which is why the unit is named there rather than assumed.
+    stats: {
+      path: "mech.stats",
+      before: "start",
+      after: "end",
+      title: "What the run did to the mech",
+      lead: "dps",
+      axis: {
+        unit: "dps",
+        rows: [["dps", "on target"], ["dps_around", "around it"], ["dps_air", "vs air"]],
+      },
+      rows: [
+        ["level", "level"],
+        ["damage", "damage"],
+        ["shots", "shots"],
+        ["interval", "interval", "s"],
+        ["crit_chance", "crit chance", "pct"],
+        ["chain", "chain hops"],
+        ["pierce", "pierce"],
+        ["burn_dps", "burn dps"],
+        ["slow", "slow", "pct"],
+        ["hull", "hull"],
+        ["speed", "speed", "px/s"],
+        ["reach", "reach", "px"],
+        ["chassis", "chassis"],
+        ["weapon", "weapon"],
+      ],
+    },
+
     upgrades: {
       path: "mech.upgrades",
       title: "Upgrades",
@@ -193,41 +246,6 @@ export const GAMES = [
         ],
       },
       {
-        // WHAT THE BUILD ADDED UP TO, which the upgrade counts above do not
-        // say: a chassis multiplies damage and fire rate, a salvaged weapon
-        // raises a tier, and research adds flat damage underneath both. Two
-        // runs that end on identical counts can be carrying very different
-        // guns, and the game works that out for its own MECH DATA panel, so
-        // the report carries the panel's numbers rather than the portal
-        // trying to derive them from the counts.
-        //
-        // Only a run summary has these. Everything here is `when`-gated on
-        // the block as a whole, so a crash report simply has no such section.
-        title: "What it could do",
-        when: ["mech.stats"],
-        rows: [
-          // Three figures and not one, because only the first of them lands
-          // on the thing the player was aiming at. A single total would be
-          // wrong in three directions at once.
-          ["dps on target", "mech.stats.dps"],
-          ["dps around it", "mech.stats.dps_around"],
-          ["dps vs air", "mech.stats.dps_air"],
-          ["chassis", "mech.stats.chassis"],
-          ["weapon", "mech.stats.weapon"],
-          ["damage", "mech.stats.damage"],
-          ["shots", "mech.stats.shots"],
-          ["interval", "mech.stats.interval"],
-          ["crit chance", "mech.stats.crit_chance"],
-          ["chain hops", "mech.stats.chain"],
-          ["pierce", "mech.stats.pierce"],
-          ["burn dps", "mech.stats.burn_dps"],
-          ["slow", "mech.stats.slow"],
-          ["hull", "mech.stats.hull"],
-          ["speed", "mech.stats.speed"],
-          ["reach", "mech.stats.reach"],
-        ],
-      },
-      {
         title: "Run",
         when: ["kills", "credits", "prestige"],
         rows: [
@@ -275,7 +293,12 @@ export function isGameId(segment) {
 // kilobytes on a sixty kilobyte page: the fetch was the more expensive half.
 export function registryForPage() {
   return GAMES.map((g) => ({
-    id: g.id, title: g.title, place: g.place, blocks: g.blocks, upgrades: g.upgrades,
+    id: g.id,
+    title: g.title,
+    place: g.place,
+    blocks: g.blocks,
+    upgrades: g.upgrades,
+    stats: g.stats,
   }));
 }
 
@@ -310,6 +333,36 @@ for (const g of GAMES) {
     picksPathFor(g.id);
   }
 }
+
+// ---------------------------------------------------------------------------
+// The before-and-after readout, checked at import for the same reason
+// everything else here is: each of these mistakes draws a card that looks fine
+// and says something wrong.
+export function checkStats(g) {
+  const st = g.stats;
+  if (!st) return;
+  for (const field of ["path", "before", "after"]) {
+    if (!st[field]) throw new Error(`${g.id}: stats has no ${field} field`);
+  }
+  if (!PATH_SHAPE.test(st.path)) throw new Error(`${g.id}: stats.path ${st.path} is not a context path`);
+  if (st.before === st.after) throw new Error(`${g.id}: stats.before and stats.after are the same key`);
+  // A shared axis is a CLAIM that the figures on it are comparable. Naming the
+  // unit is how a game says it meant to make that claim; an axis without one is
+  // three numbers of different kinds drawn as if they were the same kind.
+  if (st.axis) {
+    if (!st.axis.unit) throw new Error(`${g.id}: stats.axis has no unit, so its scale claims nothing`);
+    if (!Array.isArray(st.axis.rows) || !st.axis.rows.length) {
+      throw new Error(`${g.id}: stats.axis has no rows`);
+    }
+    if (st.lead && !st.axis.rows.some(([key]) => key === st.lead)) {
+      throw new Error(`${g.id}: stats.lead ${st.lead} is not one of the figures on the axis`);
+    }
+  } else if (st.lead) {
+    throw new Error(`${g.id}: stats.lead ${st.lead} needs an axis to lead`);
+  }
+}
+
+for (const g of GAMES) checkStats(g);
 
 // ---------------------------------------------------------------------------
 // The upgrade vocabulary, checked at import for the same reason a bad game id

@@ -199,6 +199,60 @@ pre {
   top: calc(100% + 4px);
 }
 .bo-pick:hover .up-tip, .bo-pick:focus-within .up-tip { display: block; }
+/* WHAT THE RUN DID TO THE MECH: the same readout twice, as the mech dropped in
+   and as it finished. The DIFFERENCE is the whole point, so the card leads with
+   one figure rather than tiling sixteen of equal weight.
+
+   Two shades of one hue, never two hues: this is a before and an after, not two
+   categories. The pair is validated against this surface (deutan dE 18.1, both
+   over 3:1 on #171b21) and every value is printed beside its dot anyway, so the
+   shades are the fast read and never the only one. */
+.ba-before { background: #336c9c; }
+.ba-after  { background: #58a2ec; }
+/* The legend stands in for the marks, so it wears their shape as well as their
+   colour: a square swatch for a round mark is a third thing to learn. */
+.legend i.ba-before, .legend i.ba-after { border-radius: 50%; width: 11px; height: 11px; }
+/* The headline. One number, because a card of sixteen equal numbers has no
+   headline and this one question is the reason anybody opens the card. */
+.ba-lead { display: flex; align-items: flex-end; justify-content: space-between;
+           gap: 20px; flex-wrap: wrap; margin: 0 0 14px; }
+.ba-lead h3 { margin: 0 0 4px; font-size: 11px; letter-spacing: .12em;
+              text-transform: uppercase; color: var(--dim); font-weight: 600; }
+.ba-fig { margin: 0; font-size: 15px; color: var(--dim); font-variant-numeric: tabular-nums;
+          display: flex; align-items: baseline; gap: 10px; }
+/* Text wears text tokens; the dots beside it carry the identity. */
+.ba-fig b { font-size: 40px; font-weight: 600; color: var(--text); line-height: 1.05; }
+.ba-delta { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+.ba-delta b { font-size: 20px; font-weight: 600; color: var(--text); }
+.ba-flat { color: var(--dim); }
+/* The figures that share a unit, and therefore may share a scale. Everything
+   else is a row of numbers: three quantities of different kinds on one axis is
+   a chart that lies, so the registry names the unit and nothing else gets on. */
+.ba-plot { display: grid; gap: 7px; margin: 14px 0 0; }
+.ba-row { display: grid; grid-template-columns: 96px 1fr auto; gap: 12px;
+          align-items: center; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; }
+.ba-row:hover { background: #1b212a; }
+.ba-name { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ba-track { position: relative; height: 14px; }
+.ba-track::before { content: ""; position: absolute; left: 0; right: 0; top: 6px;
+                    height: 2px; background: #10151c; border-radius: 1px; }
+/* The bar between the two dots IS the change. A dumbbell reads as a distance,
+   which is the thing being asked about. */
+.ba-link { position: absolute; top: 6px; height: 2px; background: #2c4f70; border-radius: 1px; }
+.ba-dot { position: absolute; top: 1px; width: 12px; height: 12px; border-radius: 50%;
+          margin-left: -6px; box-shadow: 0 0 0 2px var(--panel); }
+.ba-tail { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--dim); }
+.ba-tail b { color: var(--text); font-weight: 600; }
+/* Everything without a shared unit. A plain pair per row: no axis, no scale,
+   no claim that any of them can be compared with any other. */
+.ba-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+           gap: 4px 22px; margin: 18px 0 0; }
+.ba-cell { display: flex; justify-content: space-between; gap: 12px;
+           border-bottom: 1px solid var(--line); padding: 4px 0;
+           font-variant-numeric: tabular-nums; }
+.ba-cell span:first-child { color: var(--dim); }
+.ba-same { color: var(--dim); }
+.ba-arrow { color: var(--dim); padding: 0 2px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
 .legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -865,6 +919,162 @@ function sessionBuildOrders(runs, gameId) {
     rows + '</div>';
 }
 
+// ---------------------------------------------------------------------------
+// WHAT THE RUN DID TO THE MECH.
+//
+// The game reports the same readout twice, as the mech dropped in and as it
+// finished, and the number worth looking at is neither of them: it is the
+// difference. A run summary saying 214 DPS cannot tell a run that tripled its
+// damage from one that dropped in at 200 and wasted twenty minutes.
+//
+// Which keys those are, what they are called, and which of them share a unit
+// all come from the game's entry. The one thing decided here is that a shared
+// axis needs a shared unit, because three quantities of different kinds drawn
+// on one scale is a chart that lies about all three.
+
+// ONE rounding rule for every figure on this card, and for the arithmetic
+// between them. The first draft rounded the values for display and subtracted
+// the raw ones, so a card read "53 to 310" beside "+256.6" and anybody who did
+// the subtraction got a different answer than the page did.
+function statRound(n) {
+  return Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 100) / 100;
+}
+
+// A figure, in the units the entry says it is in.
+function statValue(v, format) {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v === "string") return v;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (format === "pct") return Math.round(n * 1000) / 10 + "%";
+  return format ? statRound(n) + format : String(statRound(n));
+}
+
+// How much the run moved a figure, as a signed number and, where there is
+// something to divide by, as a multiple. A rise from zero has no multiple:
+// dividing by it produces infinity, which is not a finding.
+function statChange(before, after) {
+  const a = Number(before);
+  const b = Number(after);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  // Rounded FIRST, and then subtracted, so the difference is the difference
+  // between the two numbers actually printed.
+  const from = statRound(a);
+  const to = statRound(b);
+  const times = from > 0 && to > from ? Math.round((to / from) * 10) / 10 : null;
+  return { diff: statRound(to - from), times, up: to > from, down: to < from };
+}
+
+// The pair for one run, or nothing. A run that carried only one end is not
+// drawn: half a before-and-after is a number pretending to be a comparison.
+function statPair(ctx, gameId) {
+  const spec = (entryFor(gameId) || {}).stats;
+  if (!ctx || !spec) return null;
+  const both = reach(ctx, spec.path);
+  if (!both || typeof both !== "object") return null;
+  const before = both[spec.before];
+  const after = both[spec.after];
+  if (!after || typeof after !== "object") return null;
+  return { spec, before: (before && typeof before === "object") ? before : null, after };
+}
+
+// The dumbbell. One row per figure, all on ONE scale, because the entry says
+// they share a unit. The dot pair is the fast read and the printed numbers are
+// the real one: nobody has to tell two blues apart to use this.
+function statPlot(spec, before, after) {
+  const rows = (spec.axis && spec.axis.rows) || [];
+  if (!rows.length) return "";
+  const nums = [];
+  for (const [key] of rows) {
+    for (const side of [before, after]) {
+      const n = side ? Number(side[key]) : NaN;
+      if (Number.isFinite(n)) nums.push(n);
+    }
+  }
+  const top = Math.max(1, ...nums);
+  const pct = (v) => Math.max(0, Math.min(100, (Number(v) || 0) / top * 100));
+  return '<div class="ba-plot">' + rows.map(([key, label]) => {
+    const a = before ? Number(before[key]) : NaN;
+    const b = Number(after[key]);
+    if (!Number.isFinite(b)) return "";
+    const pb = pct(b);
+    const pa = Number.isFinite(a) ? pct(a) : null;
+    const link = pa === null ? "" :
+      '<span class="ba-link" style="left:' + Math.min(pa, pb) + '%;width:' +
+      Math.abs(pb - pa) + '%"></span>';
+    const dotA = pa === null ? "" :
+      '<span class="ba-dot ba-before" style="left:' + pa + '%" title="as it dropped in: ' +
+      esc(statValue(a)) + ' ' + esc(spec.axis.unit) + '"></span>';
+    return '<div class="ba-row">' +
+      '<span class="ba-name">' + esc(label) + '</span>' +
+      '<span class="ba-track">' + link + dotA +
+        '<span class="ba-dot ba-after" style="left:' + pb + '%" title="as it finished: ' +
+        esc(statValue(b)) + ' ' + esc(spec.axis.unit) + '"></span></span>' +
+      '<span class="ba-tail">' +
+        (pa === null ? "" : esc(statValue(a)) + ' <span class="ba-arrow">&rarr;</span> ') +
+        '<b>' + esc(statValue(b)) + '</b></span>' +
+      '</div>';
+  }).join("") + '</div>';
+}
+
+// Everything with no shared unit: a pair per row and no scale at all. A figure
+// the run did not move is dimmed rather than dropped, because "nothing changed"
+// is an answer and a missing row is not.
+function statRows(spec, before, after) {
+  const cells = (spec.rows || []).map(([key, label, format]) => {
+    const b = statValue(after[key], format);
+    if (b === null) return "";
+    const a = before ? statValue(before[key], format) : null;
+    const same = a === null || a === b;
+    return '<div class="ba-cell' + (same ? " ba-same" : "") + '">' +
+      '<span>' + esc(label) + '</span>' +
+      '<span>' + (same ? "" : esc(a) + ' <span class="ba-arrow">&rarr;</span> ') +
+      esc(b) + '</span></div>';
+  }).join("");
+  return cells ? '<div class="ba-rows">' + cells + '</div>' : "";
+}
+
+function statsCard(ctx, gameId) {
+  const pair = statPair(ctx, gameId);
+  if (!pair) return "";
+  const { spec, before, after } = pair;
+
+  // The headline. One figure and not sixteen of equal weight, because a card
+  // with no headline is a table, and the question anybody opens this for is
+  // whether the run made the mech better.
+  let lead = "";
+  if (spec.lead) {
+    const label = ((spec.axis.rows.find(([k]) => k === spec.lead) || [])[1]) || spec.lead;
+    const b = statValue(after[spec.lead]);
+    const a = before ? statValue(before[spec.lead]) : null;
+    const ch = before ? statChange(before[spec.lead], after[spec.lead]) : null;
+    lead = '<div class="ba-lead">' +
+      '<div><h3>' + esc(spec.axis.unit) + ' ' + esc(label) + '</h3>' +
+      '<p class="ba-fig">' +
+        (a === null ? "" : '<span>' + esc(a) + '</span><span class="ba-arrow">&rarr;</span>') +
+        '<b>' + esc(b) + '</b></p></div>' +
+      (!ch ? "" : '<p class="ba-delta">' +
+        // Signed, and the word beside it: a rise and a fall must not be
+        // separable by colour alone, and this card has no colour to spare.
+        '<b>' + (ch.diff > 0 ? "+" : "") + esc(ch.diff) + '</b><br>' +
+        '<span class="' + (ch.diff ? "dim" : "ba-flat") + '">' +
+        (ch.diff > 0 ? "gained" : ch.diff < 0 ? "lost" : "unchanged") +
+        (ch.times ? ", " + ch.times + " times over" : "") + '</span></p>') +
+      '</div>';
+  }
+
+  const legend = '<p class="legend">' +
+    '<span><i class="ba-before"></i>as it dropped in</span>' +
+    '<span><i class="ba-after"></i>as it finished</span></p>';
+
+  return '<div class="card"><h2>' + esc(spec.title || "Before and after") + '</h2>' +
+    (before ? "" : '<p class="dim">This run reported only the mech it finished as. ' +
+      'Runs played on a build that reports both show the change.</p>') +
+    lead + (before ? legend : "") +
+    statPlot(spec, before, after) +
+    statRows(spec, before, after) + '</div>';
+}
+
 async function viewUpgrades() {
   const q = new URLSearchParams();
   if (state.game) q.set("game", state.game);
@@ -1406,6 +1616,7 @@ async function viewReport(id) {
     (r.message ? '<div class="card"><h2>Message</h2><pre>' + esc(r.message) + '</pre></div>' : "") +
     (r.stack ? '<div class="card"><h2>Stack</h2><pre>' + esc(r.stack) + '</pre></div>' : "") +
     buildOrderCard(parsed, r.game) +
+    statsCard(parsed, r.game) +
     blocks +
     (ctx && ctx !== "{}" ? '<div class="card"><h2>Context, raw</h2><pre>' + esc(ctx) + '</pre></div>' : "") +
     (r.log ? '<div class="card"><h2>Log tail</h2><pre>' + esc(r.log) + '</pre></div>' : "");
