@@ -715,7 +715,8 @@ function router(pathname, search = "") {
     "document", "location", "history", "sessionStorage", "navigator", "fetch",
     "addEventListener", "setTimeout", "GAMES",
     src + "\n;return { state, href, to, readUrl, GAMES," +
-      " effectAt, upgradeName, upgradeArt, upgradeTip };",
+      " effectAt, upgradeName, upgradeArt, upgradeTip," +
+      " picksOf, buildOrder, pickTip, runPlace };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -1085,15 +1086,180 @@ test("the vocabulary is checked, and the check is checked", () => {
   assert.doesNotThrow(bad({ a: { name: "A" } }), "vocabulary without an effect is allowed");
 });
 
-test("the vocabulary rides on the view that asks for it, not on every page", async () => {
-  // 28 upgrades of names and effects is worth carrying to the one page that
-  // draws them and not worth carrying to the other five.
+test("the vocabulary is on the page, and on the route that draws a tally", async () => {
+  // It used to be held back from the page and fetched by the one view that
+  // drew it. Three views name an upgrade now - the tally, a run's build order
+  // and a session's - so the page carries it once instead of three fetches
+  // and a cache keeping them honest.
   const onPage = JSON.stringify(registryForPage());
-  assert.ok(!onPage.includes("Vitality"), "the page's copy of the registry stays lean");
-  assert.ok(onPage.includes("mech.upgrades"), "but still says which games have upgrades at all");
+  assert.ok(onPage.includes("Vitality"), "the page can name an upgrade without asking");
+  assert.ok(onPage.includes("mech.upgrades"));
 
+  // And /v1/upgrades still hands over the whole field, because the tally is
+  // drawn from its answer rather than from the page's copy.
   const res = await fetch(`${base}/v1/upgrades?game=mining-mike`);
   const body = await res.json();
-  assert.equal(body.upgrades.meta.max_health.name, "Vitality", "and the view that draws them gets them");
+  assert.equal(body.upgrades.meta.max_health.name, "Vitality");
   assert.equal(body.upgrades.icons, "/assets/icons/mining-mike");
+});
+
+// ---------------------------------------------------------------------------
+// The build order: one run's picks, in the order they were taken.
+//
+// The tally says what got built. This says HOW, and the level on each mark is
+// not in the data - it is the count of that key so far, which is true by
+// construction and cannot drift from the levels the same run reports.
+
+const PICKED = "picks-fixture";
+
+async function postRun(session, context) {
+  const res = await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike", version: "1.0.0", kind: "run",
+      message: "failed at depth 2", session, context,
+    }),
+  });
+  assert.equal(res.status, 201);
+  return (await res.json()).id;
+}
+
+test("a pick's level is the count of that key so far", () => {
+  const { picksOf } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  const picks = picksOf([
+    { key: "max_health", wave: 1, at_sec: 20 },
+    { key: "armor", wave: 3, at_sec: 65 },
+    { key: "max_health", wave: 5, at_sec: 120 },
+    { key: "max_health", wave: 7, at_sec: 180 },
+  ], up);
+  assert.deepEqual(picks.map((p) => p.key + " " + p.level),
+    ["max_health 1", "armor 1", "max_health 2", "max_health 3"]);
+  assert.deepEqual(picks.map((p) => p.at), [20, 65, 120, 180]);
+  assert.deepEqual(picks.map((p) => p.wave), [1, 3, 5, 7]);
+});
+
+test("a pick list the entry does not describe is no list at all", () => {
+  const { picksOf } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  // A game that sends no picks, and a game whose entry says nothing about
+  // them. Both draw nothing rather than a row of marks with no upgrade on it.
+  assert.deepEqual(picksOf(undefined, up), []);
+  assert.deepEqual(picksOf([{ key: "armor", at_sec: 1 }], { path: "x" }), []);
+  // And junk inside the list is skipped rather than drawn.
+  assert.equal(picksOf([null, 7, "armor", { at_sec: 4 }, { key: "armor", at_sec: 9 }], up).length, 1);
+});
+
+test("a mark sits at the share of the run it was taken at", () => {
+  const { buildOrder } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  const picks = [
+    { key: "armor", level: 1, at: 0, wave: 1 },
+    { key: "armor", level: 2, at: 150, wave: 5 },
+    { key: "dodge", level: 1, at: 300, wave: 9 },
+  ];
+  const html = buildOrder(picks, 300, up, false);
+  assert.match(html, /left:0%/, "a pick at the start sits at the start");
+  assert.match(html, /left:50%/, "halfway through a five minute run is halfway along");
+  assert.match(html, /left:100%/);
+  // The axis is THIS run's length, so it is printed rather than implied.
+  assert.match(html, /5m 00s/);
+  assert.match(html, /3 picks/);
+
+  // The same three picks in a run twice as long sit in the first half of it.
+  const longer = buildOrder(picks, 600, up, false);
+  assert.match(longer, /left:25%/, "not rescaled to the last pick");
+  assert.ok(!/left:100%/.test(longer), "the axis is the run, not the picks");
+});
+
+test("a run whose length never arrived still has an order", () => {
+  const { buildOrder } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  const html = buildOrder([
+    { key: "armor", level: 1, at: 30, wave: 1 },
+    { key: "dodge", level: 1, at: 90, wave: 4 },
+  ], 0, up, false);
+  assert.match(html, /left:100%/, "the last pick becomes the end of the axis");
+  // And says so, because the axis then means something weaker than usual.
+  assert.match(html, /~1m 30s/);
+});
+
+test("a mark's card says what that pick did, at the level that pick bought", () => {
+  const { pickTip } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  const tip = pickTip({ key: "max_health", level: 3, at: 245, wave: 6 }, up, "centred");
+  assert.match(tip, /Vitality/);
+  assert.match(tip, /\+75 total/, "the effect at level 3, not at the level the run ended on");
+  assert.match(tip, /\+125 total/, "and at its ceiling");
+  assert.match(tip, /4m 05s/, "when it was taken");
+  assert.match(tip, /wave/);
+  assert.match(tip, />6</);
+  assert.match(tip, /lvl 3 <span class="dim">of 5/);
+});
+
+test("a card near an end of the axis opens towards the middle", () => {
+  const { buildOrder } = portal();
+  const up = REGISTRY.find((g) => g.id === "mining-mike").upgrades;
+  const html = buildOrder([
+    { key: "armor", level: 1, at: 0, wave: 1 },
+    { key: "dodge", level: 1, at: 50, wave: 5 },
+    { key: "ice", level: 1, at: 100, wave: 9 },
+  ], 100, up, false);
+  // 340px of card hung off either end of the track otherwise, and which end a
+  // mark is near is only knowable here, where the position is.
+  assert.match(html, /up-tip from-left/);
+  assert.match(html, /up-tip centred/);
+  assert.match(html, /up-tip from-right/);
+});
+
+test("the runs route carries the picks when it is told which game", async () => {
+  const id = await postRun(PICKED, {
+    mode: "campaign", outcome: "failed", depth: 2, sector_title: "Meridian",
+    run_seconds: 240, wave_number: 6,
+    upgrade_picks: [
+      { key: "max_health", wave: 2, at_sec: 40 },
+      { key: "max_health", wave: 6, at_sec: 160 },
+    ],
+  });
+
+  const named = await (await fetch(`${base}/v1/runs?game=mining-mike&session=${PICKED}`)).json();
+  const run = named.runs.find((r) => r.id === id);
+  assert.equal(run.picks.length, 2, "read through the path the registry gave");
+  assert.equal(run.picks[0].key, "max_health");
+  assert.equal(run.picks[0].at_sec, 40, "and handed over as JSON, not as a string of it");
+
+  // Without a game there is no single answer to where the picks are, so the
+  // column is absent rather than empty: a run that reported none and a list
+  // nobody asked for should not look the same.
+  const all = await (await fetch(`${base}/v1/runs?session=${PICKED}`)).json();
+  assert.ok(!("picks" in all.runs.find((r) => r.id === id)), "no game named, no picks column");
+});
+
+test("a picks field that is not a list is not a 500", async () => {
+  // Context is whatever the game sent, and a reporter mid-change can send the
+  // wrong shape. The page should draw no timeline; the service should not fall
+  // over on the way to telling it so.
+  for (const bad of ["not a list", 7, { key: "armor" }]) {
+    const id = await postRun(PICKED + "-bad", {
+      mode: "campaign", outcome: "quit", run_seconds: 60, upgrade_picks: bad,
+    });
+    const res = await fetch(`${base}/v1/runs?game=mining-mike&session=${PICKED}-bad`);
+    assert.equal(res.status, 200);
+    const run = (await res.json()).runs.find((r) => r.id === id);
+    assert.deepEqual(run.picks, [], `${JSON.stringify(bad)} should read as no picks`);
+  }
+});
+
+test("a half-filled picks entry is refused at import", () => {
+  const ok = { path: "mech.upgrades", picks: { path: "upgrade_picks", key: "key", at: "at_sec" } };
+  const bad = (picks) => () => checkUpgrades({ id: "x", upgrades: { ...ok, picks } });
+  // Two of the three field names missing draws a row of marks with no time and
+  // no upgrade on them, which reads as a page bug rather than an entry that
+  // was half filled in.
+  assert.throws(bad({ path: "p", at: "at_sec" }), /no key field/);
+  assert.throws(bad({ path: "p", key: "key" }), /no at field/);
+  assert.doesNotThrow(bad({ path: "p", key: "key", at: "at_sec" }));
+  // The wave is genuinely optional: a game with no waves still has an order.
+  assert.doesNotThrow(bad({ path: "p", key: "key", at: "at_sec", wave: "wave" }));
 });

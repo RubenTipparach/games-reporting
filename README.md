@@ -278,6 +278,33 @@ directions, so a file nobody shows and an `icon: true` with no file are each
 a failure rather than a surprise. An upgrade with no art draws a lettered
 tile, which is what the game draws for it too.
 
+### The build order of one run
+
+`upgrades.path` says what a run ended on. `upgrades.picks` says the order it
+got there in, and every place one run is on screen draws it as a time axis:
+the icon is what they took, the badge is the level that pick bought, and where
+it sits is when.
+
+```
+/mining-mike/reports/<id>                one run, under its message
+/mining-mike/sessions/<session>          every run of that session, newest first
+```
+
+The axis is THAT run's length, never the longest run on screen. A relative
+scale draws a three minute run that took four upgrades and a nine minute run
+that took four exactly the same, which is the opposite of the thing worth
+seeing.
+
+The level on a mark is **derived, not reported**: the third time a key appears
+in the list is that upgrade at level three. That is true by construction and
+cannot drift from the levels the same report carries, so a game does not send
+it and should not.
+
+A session's runs are one game's runs, so the drill-down passes the game along
+and the service looks up where that game keeps its picks. Asking for every
+game's runs at once (`/v1/runs` with no `game`) leaves the column out
+entirely, because "where are the picks" has a different answer per game.
+
 ### Is a session still running?
 
 Nothing can report its own end. A clean quit is the process leaving and a crash

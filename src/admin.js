@@ -161,6 +161,44 @@ pre {
 .up-stats dt { color: var(--dim); }
 .up-stats dd { margin: 0; display: flex; align-items: center; gap: 7px; }
 .up-stats i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+/* THE BUILD ORDER. One run's picks on the time the run took: the icon is what
+   they took, the badge is the level it took it to, and where it sits is when.
+   The axis is THIS run's length, so an early pick looks early whatever the
+   runs either side of it did. */
+.bo-run + .bo-run { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.bo-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 0 0 16px; }
+.bo-track { position: relative; height: 42px; margin: 0 18px; }
+.bo-axis { position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+           background: var(--line); border-radius: 1px; }
+.bo-pick { position: absolute; bottom: 0; transform: translateX(-50%);
+           display: flex; flex-direction: column; align-items: center; }
+.bo-pick:hover, .bo-pick:focus-within { z-index: 30; outline: none; }
+.bo-stem { width: 2px; height: 8px; background: var(--line); }
+.bo-pick:hover .bo-stem, .bo-pick:focus-within .bo-stem { background: var(--accent); }
+.bo-mark { position: relative; display: block; }
+.bo-mark .up-icon, .bo-mark .up-tile { width: 30px; height: 30px; }
+/* The level this pick bought, which is the thing a row of identical icons
+   cannot say on its own: four Vitality picks are 1, 2, 3, 4 and not four of
+   the same event. */
+.bo-lv { position: absolute; right: -5px; top: -5px; min-width: 16px; height: 16px;
+         padding: 0 3px; border-radius: 8px; background: var(--accent); color: #08101a;
+         font-size: 10px; line-height: 16px; text-align: center; font-weight: 700;
+         font-variant-numeric: tabular-nums; }
+.bo-scale { display: flex; justify-content: space-between; align-items: baseline;
+            margin: 6px 18px 0; font-size: 12px; color: var(--dim);
+            font-variant-numeric: tabular-nums; }
+/* A hover card under a mark opens towards the middle of the track, because one
+   opening outwards from either end hangs off it. */
+.up-tip.centred { left: 50%; transform: translateX(-50%); }
+.up-tip.from-left { left: -10px; }
+.up-tip.from-right { left: auto; right: -10px; }
+.up-tip.centred.above, .up-tip.from-left.above, .up-tip.from-right.above {
+  top: auto; bottom: calc(100% + 4px);
+}
+.up-tip.centred:not(.above), .up-tip.from-left:not(.above), .up-tip.from-right:not(.above) {
+  top: calc(100% + 4px);
+}
+.bo-pick:hover .up-tip, .bo-pick:focus-within .up-tip { display: block; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
 .legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -617,6 +655,32 @@ function upgradeArt(upgrades, key) {
     esc(upgradeName(upgrades, key).slice(0, 1).toUpperCase()) + '</span>';
 }
 
+// The head of a hover card: the art, the name a player would recognise, and
+// the key underneath it for anybody who will go on to read the JSON. Shared,
+// because a tally row and a single pick are the same upgrade seen from two
+// distances and should not introduce themselves differently.
+function upgradeHead(upgrades, key) {
+  const m = upgradeMeta(upgrades, key);
+  return '<div class="up-tip-head">' + upgradeArt(upgrades, key) +
+    '<div><h3>' + esc(upgradeName(upgrades, key)) + '</h3>' +
+    (m && m.name ? '<span class="dim">' + esc(key) + '</span>' : '') +
+    '</div></div>';
+}
+
+// What it does at a level, and what it would do at its ceiling. The second
+// line is dropped once they are the same line, which is the whole point of
+// printing it: it says how much of the thing is still ahead.
+function effectLines(m, unit, lv) {
+  if (!m || !m.effect) return "";
+  return '<p class="up-tip-eff"><b>' + esc(unit) + ' ' + lv + '</b>' +
+      (m.max ? ' <span class="dim">of ' + m.max + '</span>' : '') +
+      ' &middot; ' + esc(effectAt(m.effect, lv)) + '</p>' +
+    (m.max && lv < m.max
+      ? '<p class="up-tip-eff dim">' + esc(unit) + ' ' + m.max + ' &middot; ' +
+        esc(effectAt(m.effect, m.max)) + '</p>'
+      : '');
+}
+
 // The hover card: what this upgrade is, what taking it does at the level
 // people actually reach and at its ceiling, and how the runs that took it
 // ended. The bar says how OFTEN and how it WENT; this says what it IS, which
@@ -637,20 +701,9 @@ function upgradeTip(u, upgrades, above) {
   const line = (o) => (u[o] || o === "succeeded")
     ? '<dt>' + esc(o) + '</dt><dd><i class="up-seg-' + o + '"></i>' + u[o] + share(u[o]) + '</dd>'
     : '';
-  const eff = m && m.effect
-    ? '<p class="up-tip-eff"><b>' + esc(unit) + ' ' + lv + '</b>' +
-        (m.max ? ' <span class="dim">of ' + m.max + '</span>' : '') +
-        ' &middot; ' + esc(effectAt(m.effect, lv)) + '</p>' +
-      (m.max && lv < m.max
-        ? '<p class="up-tip-eff dim">' + esc(unit) + ' ' + m.max + ' &middot; ' +
-          esc(effectAt(m.effect, m.max)) + '</p>'
-        : '')
-    : '';
   return '<div class="up-tip' + (above ? " above" : "") + '" role="tooltip">' +
-    '<div class="up-tip-head">' + upgradeArt(upgrades, u.upgrade) +
-      '<div><h3>' + esc(upgradeName(upgrades, u.upgrade)) + '</h3>' +
-      (m && m.name ? '<span class="dim">' + esc(u.upgrade) + '</span>' : '') +
-      '</div></div>' + eff +
+    upgradeHead(upgrades, u.upgrade) +
+    effectLines(m, unit, lv) +
     '<dl class="up-stats">' +
       '<dt>runs</dt><dd>' + u.runs + '</dd>' +
       '<dt>' + esc(unit) + ' reached</dt><dd>' +
@@ -658,6 +711,158 @@ function upgradeTip(u, upgrades, above) {
         ' <span class="dim">typically ' + lv + '</span></dd>' +
       OUTCOMES.map(line).join("") +
     '</dl></div>';
+}
+
+// ---------------------------------------------------------------------------
+// THE BUILD ORDER: one run's picks, laid out on the time the run took.
+//
+// The tally answers what got built. This answers HOW, which is the question
+// with the design in it: whether the thing everybody takes is taken first or
+// last, whether a run that cleared front-loaded its damage, and how long a
+// player went before anything happened at all. None of that survives a
+// snapshot of the levels somebody ended on.
+//
+// Where the list is and what its entries call their fields is the game's
+// business and comes from upgrades.picks in its entry. The LEVEL is not in
+// the list and does not need to be: the third time a key appears is that
+// upgrade at level three, which is true by construction and cannot drift.
+
+// Read the picks off a context, in order, each carrying the level it took its
+// upgrade to. Anything the entry does not describe reads as nothing rather
+// than as a row of undefined.
+function picksOf(raw, upgrades) {
+  const spec = upgrades && upgrades.picks;
+  if (!spec || !Array.isArray(raw)) return [];
+  const seen = {};
+  const out = [];
+  for (const p of raw) {
+    if (!p || typeof p !== "object") continue;
+    const key = String(p[spec.key] ?? "");
+    if (!key) continue;
+    seen[key] = (seen[key] || 0) + 1;
+    out.push({
+      key,
+      level: seen[key],
+      at: Number(p[spec.at]) || 0,
+      wave: spec.wave ? p[spec.wave] : undefined,
+    });
+  }
+  return out;
+}
+
+// One pick's card. Everything the tally's card says about the upgrade, plus
+// the two things only a pick knows: which level this one bought, and when.
+function pickTip(pick, upgrades, place) {
+  const m = upgradeMeta(upgrades, pick.key);
+  const unit = upgrades.unit || "lvl";
+  return '<div class="up-tip ' + place + '" role="tooltip">' +
+    upgradeHead(upgrades, pick.key) +
+    effectLines(m, unit, pick.level) +
+    '<dl class="up-stats">' +
+      '<dt>taken at</dt><dd>' + esc(mmss(pick.at)) + ' <span class="dim">into the run</span></dd>' +
+      (pick.wave == null ? '' : '<dt>wave</dt><dd>' + esc(pick.wave) + '</dd>') +
+      '<dt>took it to</dt><dd>' + esc(unit) + ' ' + pick.level +
+        (m && m.max ? ' <span class="dim">of ' + m.max + '</span>' : '') + '</dd>' +
+    '</dl></div>';
+}
+
+// One run, drawn as its own length. The axis is the run and not the longest
+// run on screen: a three minute run that took four upgrades and a nine minute
+// run that took four are different runs, and a relative scale draws them the
+// same.
+function buildOrder(picks, seconds, upgrades, above) {
+  if (!picks.length) return "";
+  // A run whose length did not arrive still has an order to show, so the axis
+  // falls back to the last pick. Marked as such, because the axis then means
+  // something weaker than it usually does.
+  const measured = Number(seconds) > 0;
+  const span = measured ? Number(seconds) : Math.max(1, ...picks.map((p) => p.at));
+  const marks = picks.map((p, i) => {
+    const pct = Math.max(0, Math.min(100, (p.at / span) * 100));
+    // A card 340px wide, anchored under a mark near an edge, hangs off it.
+    // Which edge it opens towards is decided here, where the position is
+    // known, rather than left to a CSS that cannot see the number.
+    //
+    // A third and not a quarter, because the bucket has to hold at the
+    // NARROWEST track this draws on and not the widest: at a quarter, a
+    // centred card on a 430px track ran eleven pixels off the side of it.
+    const side = pct < 35 ? "from-left" : pct > 65 ? "from-right" : "centred";
+    return '<span class="bo-pick" style="left:' + pct + '%" tabindex="0"' +
+      ' data-i="' + i + '">' +
+      '<span class="bo-mark">' + upgradeArt(upgrades, p.key) +
+        '<span class="bo-lv">' + p.level + '</span></span>' +
+      '<span class="bo-stem"></span>' +
+      pickTip(p, upgrades, side + (above ? " above" : "")) +
+      '</span>';
+  }).join("");
+  return '<div class="bo-track">' + marks + '<span class="bo-axis"></span></div>' +
+    '<p class="bo-scale"><span class="dim">' + esc(mmss(0)) + '</span>' +
+    '<span class="dim">' + picks.length + ' pick' + (picks.length === 1 ? "" : "s") + '</span>' +
+    '<span>' + esc(measured ? mmss(span) : "~" + mmss(span)) + '</span></p>';
+}
+
+// How long a run took, which is generic: every game's runs have a length and
+// none of them call it anything else. run_seconds is what a finished run
+// reports; run_sec is what a report sent DURING one carries, and a run summary
+// carries both, because it is sent before the clock is stopped.
+function runSeconds(ctx) {
+  if (!ctx) return 0;
+  return Number(ctx.run_seconds) || Number(ctx.run_sec) || 0;
+}
+
+// The build order as a card, for anywhere one run is on screen. Returns
+// nothing at all when the game's entry describes no picks or the run carried
+// none, which is every run of every game until its reporter sends them.
+function buildOrderCard(ctx, gameId) {
+  const up = (entryFor(gameId) || {}).upgrades;
+  const spec = up && up.picks;
+  if (!ctx || !spec) return "";
+  const picks = picksOf(reach(ctx, spec.path), up);
+  if (!picks.length) return "";
+  return '<div class="card"><h2>Build order</h2>' +
+    '<p class="dim">What they took and when, laid out on the time this run took. ' +
+    'The badge on an icon is the level that pick bought.</p>' +
+    buildOrder(picks, runSeconds(ctx), up, false) + '</div>';
+}
+
+// Where a run happened, in as few words as the table above uses. Built from
+// the fields rather than from the run's own message, which already ends in the
+// outcome and would print it twice beside the chip that says it properly.
+function runPlace(r) {
+  if (r.sector && r.depth != null) return r.sector + " d" + r.depth;
+  if (r.depth != null) return "Depth " + r.depth;
+  return r.mode || "run";
+}
+
+// Every run in this session that carried a build order, newest first, on one
+// card. Reading down it is the thing the tally cannot show: whether the runs
+// that cleared took the same things in the same order as the ones that did
+// not, and how much earlier.
+function sessionBuildOrders(runs, gameId) {
+  const up = (entryFor(gameId) || {}).upgrades;
+  if (!up || !up.picks) return "";
+  const withPicks = runs
+    .map((r) => ({ run: r, picks: picksOf(r.picks, up) }))
+    .filter((x) => x.picks.length);
+  if (!withPicks.length) return "";
+  const rows = withPicks.map((x, i) =>
+    '<div class="bo-run">' +
+      '<p class="bo-head">' +
+        '<a href="' + esc(to({ report: x.run.id })) + '">' + esc(runPlace(x.run)) + '</a>' +
+        '<span class="outcome-' + esc(x.run.outcome || "unknown") + '">' +
+          esc(x.run.outcome || "-") + '</span>' +
+        '<span class="dim">' + esc(mmss(x.run.seconds)) + '</span>' +
+        '<span class="dim">' + esc(ago(x.run.received_at)) + '</span>' +
+      '</p>' +
+      // The first row opens its cards downwards and every row after it opens
+      // upwards, so a card is always inside the list rather than hanging off
+      // whichever end it happens to be nearest.
+      buildOrder(x.picks, x.run.seconds, up, i > 0) +
+    '</div>').join("");
+  return '<div class="card"><h2>Build order</h2>' +
+    '<p class="dim">Each run on the time it took. The badge on an icon is the level ' +
+    'that pick bought, and hovering one says what it did at that level.</p>' +
+    rows + '</div>';
 }
 
 async function viewUpgrades() {
@@ -910,6 +1115,11 @@ async function viewSessionList() {
 // LEVELS TWO AND THREE: one session, its modes, and the runs inside them.
 async function viewOneSession() {
   const q = new URLSearchParams({ session: state.session });
+  // The game, so the service can look up where THIS game keeps the order its
+  // upgrades were taken in. A drill-down keeps the game for exactly this kind
+  // of reason: without it the address is a cross-game list, and a build order
+  // is one game's word.
+  if (state.game) q.set("game", state.game);
   if (state.mode) q.set("mode", state.mode);
   const { runs } = await api("/v1/runs?" + q.toString());
 
@@ -1063,7 +1273,7 @@ async function viewOneSession() {
     }).join("") +
     '</div></div>';
 
-  return crumb + modeBar + bars + table;
+  return crumb + modeBar + bars + sessionBuildOrders(runs, state.game) + table;
 }
 
 // The context blocks, drawn from the GAME REGISTRY rather than from a list of
@@ -1195,6 +1405,7 @@ async function viewReport(id) {
     '</dl></div>' +
     (r.message ? '<div class="card"><h2>Message</h2><pre>' + esc(r.message) + '</pre></div>' : "") +
     (r.stack ? '<div class="card"><h2>Stack</h2><pre>' + esc(r.stack) + '</pre></div>' : "") +
+    buildOrderCard(parsed, r.game) +
     blocks +
     (ctx && ctx !== "{}" ? '<div class="card"><h2>Context, raw</h2><pre>' + esc(ctx) + '</pre></div>' : "") +
     (r.log ? '<div class="card"><h2>Log tail</h2><pre>' + esc(r.log) + '</pre></div>' : "");

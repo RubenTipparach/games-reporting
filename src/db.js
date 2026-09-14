@@ -62,6 +62,20 @@ const COLUMNS = [
 // add a column to a populated table in place, so an existing row simply gets
 // the default and keeps its data. Nothing here drops or rewrites anything,
 // which is the property that makes it safe to run unconditionally on boot.
+// A JSON column, read back as a value. A report's context is whatever the game
+// sent, so a field that should be a list can be a string, a number, or absent
+// entirely - and none of those is worth a 500 on a page that is only trying to
+// draw a timeline. Anything that is not a list reads as no list.
+function safeJson(text) {
+  if (typeof text !== "string") return [];
+  try {
+    const v = JSON.parse(text);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
 function addMissingColumns(db) {
   const present = new Set(db.prepare("PRAGMA table_info(reports)").all().map((c) => c.name));
   const added = [];
@@ -253,7 +267,12 @@ export function openDatabase(dataDir) {
     // Run summaries, newest first. Separate from list() because a run is not a
     // fault and the columns worth seeing are different ones: how it ended, how
     // long it took, how far it got.
-    runs({ game, session, mode, limit = 100 } = {}) {
+    // `picksPath` is where THIS game keeps the order its upgrades were taken
+    // in, handed down from the registry rather than known here. Without one
+    // the column is simply absent, which is what a game that reports no picks
+    // should look like: nothing, rather than an empty list that reads like a
+    // run where nobody took anything.
+    runs({ game, session, mode, limit = 100, picksPath } = {}) {
       const args = { limit: Math.min(Math.max(1, limit), PAGE.runs.max) };
       let filter = "WHERE kind = 'run'";
       if (game) {
@@ -269,6 +288,14 @@ export function openDatabase(dataDir) {
         filter += " AND json_extract(context, '$.mode') = @mode";
         args.mode = mode;
       }
+      // A value and not an identifier, so it binds like any other parameter.
+      // The registry checks its shape on the way in as well, because "it is
+      // our own data" is how the first injection in every codebase is written.
+      let picks = "";
+      if (picksPath) {
+        picks = ", json_extract(context, @picksJson) AS picks";
+        args.picksJson = "$." + picksPath;
+      }
       return db
         .prepare(`
           SELECT id, received_at, game, version, message,
@@ -283,12 +310,17 @@ export function openDatabase(dataDir) {
                  json_extract(context, '$.credits')     AS credits,
                  json_extract(context, '$.mech.level')  AS mech_level,
                  player
+                 ${picks}
           FROM reports
           ${filter}
           ORDER BY received_at DESC
           LIMIT @limit
         `)
-        .all(args);
+        .all(args)
+        // json_extract hands back the array as TEXT. Parsed here rather than
+        // on the page, so what leaves this service is JSON all the way down
+        // and not a string that happens to contain some.
+        .map((r) => (r.picks === undefined ? r : { ...r, picks: safeJson(r.picks) }));
     },
 
     // One row per play session: who, how long, what they played, how it ended.

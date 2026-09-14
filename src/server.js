@@ -8,7 +8,7 @@ import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
 import { adminPage } from "./admin.js";
-import { GAMES, isGameId, upgradePathFor } from "./games.js";
+import { GAMES, isGameId, upgradePathFor, picksPathFor } from "./games.js";
 
 const store = openDatabase(config.dataDir);
 const idSalt = loadSalt(config.dataDir);
@@ -455,12 +455,18 @@ function handleRequest(req, res, url) {
   if (path === "/v1/runs" && req.method === "GET") {
     if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
+    const game = q.get("game") || undefined;
     return send(res, 200, {
       runs: store.runs({
-        game: q.get("game") || undefined,
+        game,
         session: q.get("session") || undefined,
         mode: q.get("mode") || undefined,
         limit: pageLimit(q.get("limit"), PAGE.runs),
+        // Only when the caller named a game, because the list can span them
+        // and "where the picks are" is a different answer for each. Asking for
+        // every game's runs at once is asking a question the build order does
+        // not have: it is one run's story, and this is the cross-game list.
+        picksPath: game ? picksPathFor(game) : null,
       }),
     });
   }
