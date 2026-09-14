@@ -68,9 +68,14 @@ export const GAMES = [
     // leaves it out has no upgrade view, and a game that calls them perks
     // points at "perks" and gets the same page.
     //
-    // Snapshot rather than a timeline, because that is what arrives: the run
-    // summary carries the levels a player ENDED on. Which upgrade was taken at
-    // which wave is a different report and is not being sent yet.
+    // A SNAPSHOT: the levels a player ENDED a run on. It answers what got
+    // built and never how, which is a different and better question, so the
+    // run summary carries a second field for the order they were taken in.
+    //
+    // `picks` is where that list is and what its entries call things. The
+    // portal draws it as a time axis per run, and works the LEVEL out by
+    // counting: the third time a key appears is that upgrade at level 3. A
+    // game that sends no such list has no timeline and still has the tally.
     //
     // `meta` is what this game calls each of those keys, and what taking one
     // actually does. A game that leaves it out gets the raw key and the level,
@@ -96,6 +101,7 @@ export const GAMES = [
       title: "Upgrades",
       unit: "lvl",
       icons: "/assets/icons/mining-mike",
+      picks: { path: "upgrade_picks", key: "key", at: "at_sec", wave: "wave" },
       meta: {
         chain_lightning: { name: "Chain Lightning", max: 5, icon: true,
           effect: ["Shots chain to {0} nearby enemies", [1, 0]] },
@@ -187,6 +193,41 @@ export const GAMES = [
         ],
       },
       {
+        // WHAT THE BUILD ADDED UP TO, which the upgrade counts above do not
+        // say: a chassis multiplies damage and fire rate, a salvaged weapon
+        // raises a tier, and research adds flat damage underneath both. Two
+        // runs that end on identical counts can be carrying very different
+        // guns, and the game works that out for its own MECH DATA panel, so
+        // the report carries the panel's numbers rather than the portal
+        // trying to derive them from the counts.
+        //
+        // Only a run summary has these. Everything here is `when`-gated on
+        // the block as a whole, so a crash report simply has no such section.
+        title: "What it could do",
+        when: ["mech.stats"],
+        rows: [
+          // Three figures and not one, because only the first of them lands
+          // on the thing the player was aiming at. A single total would be
+          // wrong in three directions at once.
+          ["dps on target", "mech.stats.dps"],
+          ["dps around it", "mech.stats.dps_around"],
+          ["dps vs air", "mech.stats.dps_air"],
+          ["chassis", "mech.stats.chassis"],
+          ["weapon", "mech.stats.weapon"],
+          ["damage", "mech.stats.damage"],
+          ["shots", "mech.stats.shots"],
+          ["interval", "mech.stats.interval"],
+          ["crit chance", "mech.stats.crit_chance"],
+          ["chain hops", "mech.stats.chain"],
+          ["pierce", "mech.stats.pierce"],
+          ["burn dps", "mech.stats.burn_dps"],
+          ["slow", "mech.stats.slow"],
+          ["hull", "mech.stats.hull"],
+          ["speed", "mech.stats.speed"],
+          ["reach", "mech.stats.reach"],
+        ],
+      },
+      {
         title: "Run",
         when: ["kills", "credits", "prestige"],
         rows: [
@@ -227,17 +268,14 @@ export function isGameId(segment) {
 // routes here and the drawing there - because two copies of "what does this
 // game call a depth" is how they end up disagreeing.
 //
-// Minus `meta`, which is the one part of an entry that is big: a line of
-// vocabulary per upgrade, on every page load, to be read by the one view that
-// asks for it anyway. /v1/upgrades hands over the whole `upgrades` field, so
-// the upgrade page gets it there and nothing else carries it.
+// `meta` included. It was held back for a while and fetched by the one view
+// that drew it, which was right while that was true and stopped being true the
+// moment a run report and a session both wanted to name an upgrade too. Three
+// views, three fetches and a cache to keep them honest, to save three
+// kilobytes on a sixty kilobyte page: the fetch was the more expensive half.
 export function registryForPage() {
   return GAMES.map((g) => ({
-    id: g.id,
-    title: g.title,
-    place: g.place,
-    blocks: g.blocks,
-    upgrades: g.upgrades && { ...g.upgrades, meta: undefined },
+    id: g.id, title: g.title, place: g.place, blocks: g.blocks, upgrades: g.upgrades,
   }));
 }
 
@@ -255,8 +293,22 @@ export function upgradePathFor(id) {
   return path;
 }
 
+// Where a game's run summary keeps the order its upgrades were taken in, if it
+// keeps one at all. Null is not a failure: it is a game that reports what was
+// built and not how, which is every game until its reporter learns to.
+export function picksPathFor(id) {
+  const g = gameById(id);
+  const path = g && g.upgrades && g.upgrades.picks && g.upgrades.picks.path;
+  if (!path) return null;
+  if (!PATH_SHAPE.test(path)) throw new Error(`upgrades.picks.path ${path} is not a context path`);
+  return path;
+}
+
 for (const g of GAMES) {
-  if (g.upgrades) upgradePathFor(g.id);
+  if (g.upgrades) {
+    upgradePathFor(g.id);
+    picksPathFor(g.id);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +330,17 @@ const ICONS_SHAPE = /^\/assets\/icons\/[a-z0-9][a-z0-9-]{0,63}$/;
 // only ever sees entries that are right, which proves nothing about a check.
 export function checkUpgrades(g) {
   const up = g.upgrades;
-  if (!up || !up.meta) return;
+  if (!up) return;
+  // A pick entry is read by three field names the game chose, so all three
+  // have to be there. Two of them missing draws a timeline of marks with no
+  // time and no upgrade on them, which looks like a page bug rather than an
+  // entry that was half filled in.
+  if (up.picks) {
+    for (const field of ["key", "at"]) {
+      if (!up.picks[field]) throw new Error(`${g.id}: upgrades.picks has no ${field} field`);
+    }
+  }
+  if (!up.meta) return;
   if (up.icons !== undefined && !ICONS_SHAPE.test(up.icons)) {
     throw new Error(`${g.id}: upgrades.icons ${up.icons} is not a path on this service`);
   }

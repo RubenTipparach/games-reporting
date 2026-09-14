@@ -47,6 +47,7 @@ for every game and the registry says nothing about them:
 | `upgrades.path` | the context path holding what a player built, name to level |
 | `upgrades.meta` | what the game calls each of those, and what taking one does |
 | `upgrades.icons` | where that game's art lives, one `<key>.png` per upgrade |
+| `upgrades.picks` | where a run keeps the ORDER they were taken in, and what its entries call their fields |
 
 ## Adding a game
 
@@ -111,6 +112,21 @@ against an entry that is wrong.
 `icon: false` is art the game does not have. The page draws a lettered tile,
 which is what the game draws too - a hole somebody can see beats a broken
 image, and beats pretending the upgrade is not there.
+
+### The build order
+
+`upgrades.path` is a SNAPSHOT: the levels a run ended on. `upgrades.picks` is
+the same run's list of decisions in order, and the portal draws it as a time
+axis per run.
+
+**The level on a mark is not in the data, and must not be put there.** It is
+the count of that key so far: the third time `max_health` appears is Vitality
+at three. True by construction, and it cannot drift from the levels the same
+report carries. A game that adds a `level` field to its pick entries is adding
+a second copy of a number it already sends.
+
+A game that sends no such list has no timeline and still has the tally, which
+is every game until its reporter learns to send one.
 
 ## Charts
 
