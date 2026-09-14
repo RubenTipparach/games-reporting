@@ -965,15 +965,29 @@ function statChange(before, after) {
   return { diff: statRound(to - from), times, up: to > from, down: to < from };
 }
 
-// The pair for one run, or nothing. A run that carried only one end is not
-// drawn: half a before-and-after is a number pretending to be a comparison.
+// The pair for one run, or nothing.
+//
+// TWO SHAPES arrive here, and both are real. A reporter that sends both ends
+// nests them under the two keys the entry names. A reporter that sends ONE
+// sends the figures FLAT, because that is what the first version of this
+// shipped and what every run already on the service carries.
+//
+// Flat IS the end: the mech as the run finished. Reading it as nothing at all
+// was a bug that shipped - the card drew for a fixture shaped {end: ...} and
+// drew nothing at all for the shape actually on the wire, which is the one
+// case that mattered, since no build was sending the other one yet.
+//
+// A start with no end is still nothing: that is a run that opened and never
+// reported finishing, and half a before-and-after is a number pretending to
+// be a comparison.
 function statPair(ctx, gameId) {
   const spec = (entryFor(gameId) || {}).stats;
   if (!ctx || !spec) return null;
   const both = reach(ctx, spec.path);
   if (!both || typeof both !== "object") return null;
-  const before = both[spec.before];
-  const after = both[spec.after];
+  const nested = spec.after in both || spec.before in both;
+  const after = nested ? both[spec.after] : both;
+  const before = nested ? both[spec.before] : null;
   if (!after || typeof after !== "object") return null;
   return { spec, before: (before && typeof before === "object") ? before : null, after };
 }

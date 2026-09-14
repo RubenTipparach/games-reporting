@@ -1387,6 +1387,39 @@ test("half a pair is not dressed up as a whole one", () => {
   assert.equal(statPair(mech, "no-such-game"), null);
 });
 
+test("a flat stats block is the end, because that is what one end looks like", () => {
+  const { statPair, statsCard } = portal();
+  // Copied off a real report on the live service. The first reporter to send
+  // these sent them FLAT, and that is what every run already collected carries,
+  // so this is the shape that matters most and the one the card missed: it drew
+  // for a fixture shaped {end: ...} and drew nothing at all for this.
+  const live = { mech: { stats: {
+    burn_dps: 0, chain: 8, chassis: "Combat", crit_chance: 0, damage: 27,
+    dps: 189, dps_air: 0, dps_around: 2309, hull: 185, interval: 0.14,
+    level: 28, pierce: 0, reach: 720, shots: 1, slow: 0.64, speed: 200,
+    weapon: "Autocannon",
+  } } };
+  const pair = statPair(live, "mining-mike");
+  assert.ok(pair, "a flat block is a readout, not a malformed one");
+  assert.equal(pair.after.dps, 189, "and it is the END: the mech as the run finished");
+  assert.equal(pair.before, null, "with no start to compare it against");
+
+  const html = statsCard(live, "mining-mike");
+  assert.match(html, /189/, "the headline draws");
+  assert.match(html, /2309/, "and so does the rest of the readout");
+  assert.match(html, /Autocannon/);
+  assert.match(html, /only the mech it finished as/, "and it says which end it has");
+  assert.ok(!/as it dropped in/.test(html), "no legend for a mark it cannot draw");
+});
+
+test("a start with no end is still not a comparison", () => {
+  const { statPair } = portal();
+  const { mech } = statsFixture();
+  // A run that opened and never reported finishing. Nested, so it is read as
+  // nested, and then there is nothing to compare against.
+  assert.equal(statPair({ mech: { stats: { start: mech.stats.start } } }, "mining-mike"), null);
+});
+
 test("an axis that claims a shared scale has to name the unit", () => {
   const base = { path: "mech.stats", before: "start", after: "end" };
   const bad = (over) => () => checkStats({ id: "x", stats: { ...base, ...over } });

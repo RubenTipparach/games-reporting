@@ -152,6 +152,12 @@ A run carrying only one end still draws, and says which end it is. A missing
 start is never filled in from the end: that would read as a run that changed
 nothing, which is a finding, and inventing one is worse than admitting the gap.
 
+**Both shapes arrive, and both are real.** A reporter sending both ends nests
+them under the two keys the entry names. A reporter sending ONE sends the
+figures flat, because that is what the first version shipped and what every
+run already collected carries. Flat IS the end, and reading it as nothing at
+all is how this shipped broken once.
+
 ## Charts
 
 Two decisions the portal's charts already made, both worth keeping:
@@ -219,6 +225,12 @@ Three habits this suite learned the hard way:
 - **A test that only fails sometimes is not a test.** Both of the above shipped,
   went red in CI, and had to be rewritten. Check a new test by breaking the
   code it covers and watching it fail.
+- **A fixture is not the wire.** The before-and-after card was tested against a
+  hand-written `{end: ...}` and shipped unable to draw the FLAT shape every
+  report on the service actually carried, so the live page showed nothing at
+  all. Breaking the code and watching the test fail does not catch this: the
+  test and the code agreed, and both were wrong about the data. When a shape
+  is already on the wire, copy one off the service into the test.
 
 The portal's browser script is compiled and run by the suite
 (`router()` in `test/open.test.mjs`), so routing is tested rather than read. It
