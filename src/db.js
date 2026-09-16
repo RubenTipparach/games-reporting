@@ -62,6 +62,79 @@ const COLUMNS = [
 // add a column to a populated table in place, so an existing row simply gets
 // the default and keeps its data. Nothing here drops or rewrites anything,
 // which is the property that makes it safe to run unconditionally on boot.
+// ONE grouped SELECT behind both the session list and the totals above it.
+//
+// Two copies of this grouping is exactly how a header ends up disagreeing with
+// the table underneath it: the same six aggregates, written twice, drifting the
+// first time one of them is corrected. The callers differ only in what they
+// wrap around this.
+function sessionFilter(game, args) {
+  let filter = "WHERE session <> ''";
+  if (game) {
+    filter += " AND game = @game";
+    args.game = game;
+  }
+  return filter;
+}
+
+function sessionRollup(filter, having) {
+  return `
+          SELECT session,
+                 MAX(game)                   AS game,
+                 MAX(version)                AS version,
+                 MAX(player)                 AS player,
+                 MIN(received_at)            AS first_seen,
+                 MAX(received_at)            AS last_seen,
+                 -- Two clocks, deliberately. The first is the whole time the
+                 -- executable was up, menus and all; the second is the part of
+                 -- it spent inside a run. The gap between them is the shell,
+                 -- and a session that is ninety minutes open with twenty
+                 -- minutes of runs in it says something no single number does.
+                 MAX(COALESCE(json_extract(context, '$.session_sec'), 0)) AS seconds,
+                 MAX(COALESCE(json_extract(context, '$.played_sec'), 0))  AS played,
+                 MAX(COALESCE(json_extract(context, '$.channel'), '')) AS channel,
+                 -- What they played. A session can hold both, so this is the
+                 -- set rather than a single value.
+                 GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
+                 SUM(CASE WHEN kind = 'run' THEN 1 ELSE 0 END) AS runs,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
+                 SUM(CASE WHEN kind IN ('crash','error') THEN 1 ELSE 0 END) AS faults,
+                 -- STILL RUNNING, or over. A session cannot report its own end
+                 -- - a clean quit is the process leaving and a crash is the
+                 -- process gone - so the only evidence either way is the
+                 -- check-in, and the only reading of it is the absence. Inside
+                 -- the window the game is still there; past it, it is not.
+                 CASE WHEN @now - MAX(received_at) < @staleAfter
+                      THEN 1 ELSE 0 END AS live,
+                 -- When the last thing we heard was heard, so a caller can say
+                 -- "4m ago" about a live session without a second query.
+                 @now - MAX(received_at) AS silent_for,
+                 -- Ended in a crash only if the crash was the LAST WORD.
+                 --
+                 -- This used to be "a marker crash exists anywhere in this
+                 -- session", and that is not the same claim. A marker crash is
+                 -- posted by a LATER launch that found a marker file lying
+                 -- about, and a second copy of the game started while the
+                 -- first is still open finds exactly that - so a session that
+                 -- ran for ten more hours after the marker was read was being
+                 -- reported as having died at the start of it. The check-ins
+                 -- that came afterwards are the refutation, and they are right
+                 -- there in the same rows.
+                 CASE WHEN MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
+                                    THEN received_at END) IS NOT NULL
+                       AND COALESCE(MAX(CASE WHEN kind = 'session' THEN received_at END), 0)
+                           < MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
+                                      THEN received_at END)
+                      THEN 1 ELSE 0 END AS ended_in_crash
+          FROM reports
+          ${filter}
+          GROUP BY session
+          ${having}
+  `;
+}
+
 // A JSON column, read back as a value. A report's context is whatever the game
 // sent, so a field that should be a list can be a string, a number, or absent
 // entirely - and none of those is worth a 500 on a page that is only trying to
@@ -336,75 +409,85 @@ export function openDatabase(dataDir) {
     // `now` and `staleAfter` are passed in rather than read from a clock in
     // here, so the same rows can be asked about at a chosen instant - which is
     // what makes liveness testable without waiting five minutes for it.
-    sessions({ game, limit = 100, now = Date.now(), staleAfter = 600_000 } = {}) {
+    sessions({
+      game, limit = 100, now = Date.now(), staleAfter = 600_000,
+      withEmpty = true, before, beforeId,
+    } = {}) {
       const args = {
         limit: Math.min(Math.max(1, limit), PAGE.sessions.max),
         now,
         staleAfter,
       };
-      let filter = "WHERE session <> ''";
-      if (game) {
-        filter += " AND game = @game";
-        args.game = game;
+      const filter = sessionFilter(game, args);
+      // Both tests are HAVINGs and not WHEREs, for the same reason the issue
+      // rollup's cursor is: `runs` and `last_seen` are aggregates, and neither
+      // exists until the rows are grouped.
+      const tests = [];
+      // A session that finished no run is somebody who opened the game, looked
+      // at it, and closed it again. Worth counting and not worth a row.
+      //
+      // Defaults to INCLUDING them here and to excluding them at the route,
+      // which is the right way round: a store hands back what is in the table,
+      // and which of it is worth a screenful is a decision about the product.
+      if (!withEmpty) tests.push("runs > 0");
+      if (before) {
+        // `session` is the GROUP BY key and so is unique per row, which makes
+        // (last_seen, session) a total order the same way (received_at, id) is
+        // for the report listing.
+        tests.push(beforeId
+          ? "(last_seen < @before OR (last_seen = @before AND session < @beforeId))"
+          : "last_seen < @before");
+        args.before = before;
+        if (beforeId) args.beforeId = beforeId;
       }
+      const having = tests.length ? "HAVING " + tests.join(" AND ") : "";
       return db
         .prepare(`
-          SELECT session,
-                 MAX(game)                   AS game,
-                 MAX(version)                AS version,
-                 MAX(player)                 AS player,
-                 MIN(received_at)            AS first_seen,
-                 MAX(received_at)            AS last_seen,
-                 -- Two clocks, deliberately. The first is the whole time the
-                 -- executable was up, menus and all; the second is the part of
-                 -- it spent inside a run. The gap between them is the shell,
-                 -- and a session that is ninety minutes open with twenty
-                 -- minutes of runs in it says something no single number does.
-                 MAX(COALESCE(json_extract(context, '$.session_sec'), 0)) AS seconds,
-                 MAX(COALESCE(json_extract(context, '$.played_sec'), 0))  AS played,
-                 MAX(COALESCE(json_extract(context, '$.channel'), '')) AS channel,
-                 -- What they played. A session can hold both, so this is the
-                 -- set rather than a single value.
-                 GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
-                 SUM(CASE WHEN kind = 'run' THEN 1 ELSE 0 END) AS runs,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
-                 SUM(CASE WHEN kind IN ('crash','error') THEN 1 ELSE 0 END) AS faults,
-                 -- STILL RUNNING, or over. A session cannot report its own end
-                 -- - a clean quit is the process leaving and a crash is the
-                 -- process gone - so the only evidence either way is the
-                 -- check-in, and the only reading of it is the absence. Inside
-                 -- the window the game is still there; past it, it is not.
-                 CASE WHEN @now - MAX(received_at) < @staleAfter
-                      THEN 1 ELSE 0 END AS live,
-                 -- When the last thing we heard was heard, so a caller can say
-                 -- "4m ago" about a live session without a second query.
-                 @now - MAX(received_at) AS silent_for,
-                 -- Ended in a crash only if the crash was the LAST WORD.
-                 --
-                 -- This used to be "a marker crash exists anywhere in this
-                 -- session", and that is not the same claim. A marker crash is
-                 -- posted by a LATER launch that found a marker file lying
-                 -- about, and a second copy of the game started while the
-                 -- first is still open finds exactly that - so a session that
-                 -- ran for ten more hours after the marker was read was being
-                 -- reported as having died at the start of it. The check-ins
-                 -- that came afterwards are the refutation, and they are right
-                 -- there in the same rows.
-                 CASE WHEN MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
-                                    THEN received_at END) IS NOT NULL
-                       AND COALESCE(MAX(CASE WHEN kind = 'session' THEN received_at END), 0)
-                           < MAX(CASE WHEN json_extract(context, '$.detected_by') = 'session marker'
-                                      THEN received_at END)
-                      THEN 1 ELSE 0 END AS ended_in_crash
-          FROM reports
-          ${filter}
-          GROUP BY session
-          ORDER BY last_seen DESC
+          ${sessionRollup(filter, having)}
+          ORDER BY last_seen DESC, session DESC
           LIMIT @limit
         `)
         .all(args);
+    },
+
+    // The same sessions, counted rather than listed.
+    //
+    // The header above the list says how long the playtest was and how often
+    // it ended in a crash, and those are claims about ALL of it. Working them
+    // out from the rows on screen was fine while one screenful was all there
+    // was; with a cursor under the list it would mean a crash rate that moved
+    // every time somebody pressed Load more.
+    sessionTotals({ game, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
+      const args = { now, staleAfter };
+      const filter = sessionFilter(game, args);
+      const shown = sessionRollup(filter, withEmpty ? "" : "HAVING runs > 0");
+      const totals = db.prepare(`
+        SELECT COUNT(*)                          AS sessions,
+               COALESCE(SUM(seconds), 0)         AS seconds,
+               COALESCE(SUM(played), 0)          AS played,
+               COALESCE(SUM(live), 0)            AS live,
+               COALESCE(SUM(CASE WHEN live = 0 THEN 1 ELSE 0 END), 0) AS ended,
+               COALESCE(SUM(CASE WHEN live = 0 AND ended_in_crash = 1 THEN 1 ELSE 0 END), 0)
+                                                 AS crashed
+        FROM (${shown})
+      `).get(args);
+      // How many rows the runs filter is keeping off the list. Reported even
+      // when nothing is being hidden, because "0 with no runs" and "we are not
+      // filtering" are the same screen and different facts.
+      const empty = db.prepare(`
+        SELECT COUNT(*) AS n FROM (${sessionRollup(filter, "HAVING runs = 0")})
+      `).get(args).n;
+      // The middle session, over the same set as the rest of these. The two
+      // middles averaged on an even count, which is the definition the page
+      // used while it was working this out from one screenful.
+      const median = db.prepare(`
+        SELECT COALESCE(AVG(seconds), 0) AS med FROM (
+          SELECT seconds FROM (${shown}) ORDER BY seconds
+          LIMIT 2 - (SELECT COUNT(*) FROM (${shown})) % 2
+          OFFSET (SELECT MAX(0, (COUNT(*) - 1) / 2) FROM (${shown}))
+        )
+      `).get(args).med;
+      return { ...totals, empty, median: Math.round(median) };
     },
 
     // WHAT PLAYERS BUILT, tallied across runs.

@@ -300,6 +300,27 @@ in the list is that upgrade at level three. That is true by construction and
 cannot drift from the levels the same report carries, so a game does not send
 it and should not.
 
+### Which sessions are worth a row
+
+Most sessions are somebody opening the game and closing it again. `GET
+/v1/sessions` holds those back and says how many it is holding:
+
+```
+/v1/sessions?game=mining-mike           the ones that finished a run
+/v1/sessions?game=mining-mike&empty=1   all of them
+```
+
+It pages like the other lists, on a `(last_seen, session)` cursor, and carries
+`totals` on the first page only: the count, the playtime, the median length and
+the crash rate over the WHOLE filtered set rather than over the page. Those are
+claims about all of it, and a crash rate that moved every time somebody pressed
+Load more would be a worse number than no number.
+
+The filter is applied in SQL rather than on the page for the same reason: a
+page of fifty should be fifty rows somebody wants. Filtered after the fact it
+would be fifty rows taken off the service and however many of them happened to
+qualify, with the cursor paging a list nobody is looking at.
+
 A session's runs are one game's runs, so the drill-down passes the game along
 and the service looks up where that game keeps its picks. Asking for every
 game's runs at once (`/v1/runs` with no `game`) leaves the column out
