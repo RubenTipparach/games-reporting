@@ -32,6 +32,7 @@ for every game and the registry says nothing about them:
 | Its life | the `Session` context block: how long open, how long in a run |
 | Grouping | the signature, and the issue rollup over it |
 | Sessions | the five minute check-in, live vs ended, ended in a crash |
+| Getting in | whether a session ever ENTERED a game, which is not whether it finished a run |
 | Run outcomes | succeeded, failed, quit |
 
 ### What is game-specific, and therefore IS the registry
@@ -158,6 +159,36 @@ figures flat, because that is what the first version shipped and what every
 run already collected carries. Flat IS the end, and reading it as nothing at
 all is how this shipped broken once.
 
+## Starting a game is not finishing one
+
+**A run summary is sent when a run ENDS.** Somebody who opens the game, starts
+a run and quits mid-way sends none, so every count built on run summaries reads
+zero for them - and that is the most common shape in a playtest, and the one
+with the crashes in it. On the live service it was 292 of 500 sessions, and 400
+of the 445 that carried a fault.
+
+So the session rollup carries `entered` alongside `runs`, from two generic
+signals: time inside a run (`played_sec`), or the id of one that was begun
+(`run`). Three states, not two:
+
+| | |
+| --- | --- |
+| finished runs | the outcomes, as they always were |
+| started, unfinished | got in and walked away mid-run |
+| menus only | never got in at all, and the only thing held off the list |
+
+The first version of this filter held back everything with no run summary, and
+that is the mistake to not make again: **"no runs" and "never played" are
+different facts**, and the gap between them is most of what a playtest is.
+
+## A page with no runs still has to say something
+
+A session that finished nothing still has a machine, a build, two clocks and
+whatever went wrong. The session drill-down draws all of that before it draws
+any runs, and the faults the session list has always counted are fetched with
+`/v1/reports?session=` - a filter that did not exist until the page that needed
+it did, so the count led to a page that never mentioned it.
+
 ## Charts
 
 Two decisions the portal's charts already made, both worth keeping:
@@ -184,7 +215,7 @@ somebody does with this service is paste a link at somebody else:
 ```
 /mining-mike/issues            /mining-mike/issues/<signature>
 /mining-mike/reports           /mining-mike/reports/<id>
-/mining-mike/sessions          ?empty=1 adds the ones that finished no run
+/mining-mike/sessions          ?menus=1 adds the ones that never got into a game
 /mining-mike/sessions/<session>/<mode>
 /mining-mike/upgrades          ?sector=<name> narrows it
 /issues                        the same pages across every game
@@ -199,10 +230,11 @@ Two rules fall out of this and are worth keeping:
 - **Paging never touches the address.** What is shareable is the view, not how
   far somebody scrolled it.
 - **A filter belongs on the service, not on the page.** The session list hides
-  the sessions that finished no run, and it hides them in SQL: a filter applied
-  after a page arrives takes fifty rows off the service and draws twelve, and
-  the cursor is then paging a different list than the one on screen. The same
-  filter has to ride on every page, which is what `listQuery()` is for.
+  the sessions that never got into a game, and it hides them in SQL: a filter
+  applied after a page arrives takes fifty rows off the service and draws
+  twelve, and the cursor is then paging a different list than the one on
+  screen. The same filter has to ride on every page, which is what
+  `listQuery()` is for.
 - **A header describes the list, not the page.** The session totals are their
   own query over the whole filtered set, from the same grouped SELECT the rows
   come from. Worked out from the rows on screen, a crash rate would move every

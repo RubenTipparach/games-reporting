@@ -323,10 +323,10 @@ test("a marker crash is only an ending if nothing checked in after it", () => {
 });
 
 test("the window comes from config, so it can follow the game's interval", async () => {
-  // empty=1 because these fixtures are check-ins with no runs behind them, and
-  // the route holds those back now. What is being tested here is the liveness
-  // window, not which rows are worth a screenful.
-  const res = await fetch(`${base}/v1/sessions?game=${LIVE}&limit=50&empty=1`);
+  // menus=1 because these fixtures are check-ins that never entered a game,
+  // and the route holds those back now. What is being tested here is the
+  // liveness window, not which rows are worth a screenful.
+  const res = await fetch(`${base}/v1/sessions?game=${LIVE}&limit=50&menus=1`);
   assert.equal(res.status, 200);
   const { sessions } = await res.json();
   const row = sessions.find((s) => s.session === "still-here");
@@ -721,7 +721,7 @@ function router(pathname, search = "") {
       " effectAt, upgradeName, upgradeArt, upgradeTip," +
       " picksOf, buildOrder, pickTip, runPlace," +
       " statsCard, statPair, statPlot, statRows, statChange, statValue," +
-      " listQuery, sessionRows };",
+      " listQuery, sessionRows, sessionAbout, faultCard, reportRows };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -852,8 +852,9 @@ test("a session that closed normally is not marked as crashed", async () => {
     body: JSON.stringify({ game: "pt", kind: "session", message: "played for 5m",
       session: "sess-b", context: { session_sec: 300, mode: "survival" } }),
   });
-  // A heartbeat and nothing else, so it is one of the rows the list holds back.
-  const { sessions } = await fetch(`${base}/v1/sessions?game=pt&empty=1`).then((r) => r.json());
+  // A heartbeat with no time inside a run, so it never left the menu and is
+  // one of the rows the list holds back.
+  const { sessions } = await fetch(`${base}/v1/sessions?game=pt&menus=1`).then((r) => r.json());
   const b = sessions.find((s) => s.session === "sess-b");
   assert.equal(b.ended_in_crash, 0);
   assert.equal(b.seconds, 300);
@@ -888,7 +889,7 @@ test("a session reports both clocks, and they are different numbers", async () =
   await post({ game: "clocks", kind: "session", message: "open 90m, 20m in game",
     session: "sess-clock", context: { session_sec: 5400, played_sec: 1200, mode: "campaign" } });
 
-  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&empty=1`).then((r) => r.json());
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&menus=1`).then((r) => r.json());
   const c = sessions.find((s) => s.session === "sess-clock");
   assert.equal(c.seconds, 5400, "the whole time the exe was up");
   assert.equal(c.played, 1200, "and the part of it inside a run");
@@ -901,7 +902,7 @@ test("a session with no runs reports open time and zero play time", async () => 
     body: JSON.stringify({ game: "clocks", kind: "session", message: "open 9m",
       session: "sess-menus", context: { session_sec: 546, played_sec: 0 } }),
   });
-  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&empty=1`).then((r) => r.json());
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&menus=1`).then((r) => r.json());
   const m = sessions.find((s) => s.session === "sess-menus");
   assert.equal(m.seconds, 546);
   assert.equal(m.played, 0, "nine minutes of shell, and the table should say so");
@@ -1488,20 +1489,20 @@ function seedSessions() {
   return seeded;
 }
 
-test("a session that finished no run is held back, and counted", async () => {
+test("a session that never left the menu is held back, and counted", async () => {
   await seedSessions();
   const shown = await (await fetch(`${base}/v1/sessions?game=${SESS}`)).json();
-  assert.equal(shown.sessions.length, 6, "only the ones that played");
-  assert.ok(shown.sessions.every((s) => s.runs > 0));
+  assert.equal(shown.sessions.length, 6, "only the ones that got into a game");
+  assert.ok(shown.sessions.every((s) => s.runs > 0 || s.entered));
   // Held back rather than dropped: the header says how many, so the button
   // that shows them is an informed click rather than a guess.
   assert.equal(shown.totals.empty, 4);
   assert.equal(shown.totals.sessions, 6, "and the totals describe what is listed");
 
-  const all = await (await fetch(`${base}/v1/sessions?game=${SESS}&empty=1`)).json();
+  const all = await (await fetch(`${base}/v1/sessions?game=${SESS}&menus=1`)).json();
   assert.equal(all.sessions.length, 10);
   assert.equal(all.totals.sessions, 10, "the totals follow the filter");
-  assert.equal(all.totals.empty, 4, "and still say how many have no runs");
+  assert.equal(all.totals.empty, 4, "and still say how many never left the menu");
 });
 
 test("the filter is held on the service, so a page is a page of rows somebody wants", async () => {
@@ -1511,7 +1512,7 @@ test("the filter is held on the service, so a page is a page of rows somebody wa
   // off the service and drawn however many of them happened to qualify.
   const page = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=4`)).json();
   assert.equal(page.sessions.length, 4);
-  assert.ok(page.sessions.every((s) => s.runs > 0));
+  assert.ok(page.sessions.every((s) => s.runs > 0 || s.entered));
   assert.ok(page.next, "and a cursor, because the page came back full");
 });
 
@@ -1520,7 +1521,7 @@ test("the session cursor walks the list once, losing and repeating nothing", asy
   const seen = [];
   let cursor;
   for (let page = 0; page < 20; page++) {
-    const q = new URLSearchParams({ game: SESS, limit: "3", empty: "1" });
+    const q = new URLSearchParams({ game: SESS, limit: "3", menus: "1" });
     if (cursor) {
       q.set("before", String(cursor.before));
       q.set("before_id", String(cursor.before_id));
@@ -1539,10 +1540,10 @@ test("the session cursor walks the list once, losing and repeating nothing", asy
 
   // The totals ride on the first page only: a number describing the whole list
   // does not change as somebody walks down it.
-  const first = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=3&empty=1`)).json();
+  const first = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=3&menus=1`)).json();
   assert.ok(first.totals);
   const second = await (await fetch(
-    `${base}/v1/sessions?game=${SESS}&limit=3&empty=1` +
+    `${base}/v1/sessions?game=${SESS}&limit=3&menus=1` +
     `&before=${first.next.before}&before_id=${first.next.before_id}`)).json();
   assert.ok(!second.totals, "and are not recounted for every page");
 });
@@ -1572,28 +1573,28 @@ test("the totals and the rows come from one grouped SELECT", async () => {
   assert.equal(t.played, rows.reduce((n, s) => n + s.played, 0));
   assert.equal(t.live, rows.filter((s) => s.live).length);
   assert.equal(t.ended, rows.filter((s) => !s.live).length);
-  assert.equal(t.empty, rows.filter((s) => !s.runs).length);
+  assert.equal(t.empty, rows.filter((s) => !s.runs && !s.entered).length);
 
-  const withRuns = store.sessions({ game: SESS, now, staleAfter: 600_000, limit: 500, withEmpty: false });
-  const tRuns = store.sessionTotals({ game: SESS, now, staleAfter: 600_000, withEmpty: false });
-  assert.equal(tRuns.sessions, withRuns.length);
-  assert.equal(tRuns.empty, 4, "the count of what is being held back does not follow the filter");
+  const played = store.sessions({ game: SESS, now, staleAfter: 600_000, limit: 500, withEmpty: false });
+  const tPlayed = store.sessionTotals({ game: SESS, now, staleAfter: 600_000, withEmpty: false });
+  assert.equal(tPlayed.sessions, played.length);
+  assert.equal(tPlayed.empty, 4, "the count of what is being held back does not follow the filter");
 });
 
 test("the list's filter is in the address, and only on the list", () => {
   // A filter is a query rather than a place, the same way the sector is, so a
   // link to it opens on the screenful somebody was looking at.
-  const all = router("/mining-mike/sessions", "?empty=1");
-  assert.equal(all.state.empty, true);
-  assert.equal(all.href(all.state), "/mining-mike/sessions?empty=1");
+  const all = router("/mining-mike/sessions", "?menus=1");
+  assert.equal(all.state.menus, true);
+  assert.equal(all.href(all.state), "/mining-mike/sessions?menus=1");
 
-  const runs = router("/mining-mike/sessions");
-  assert.equal(runs.state.empty, false, "held back by default");
-  assert.equal(runs.href(runs.state), "/mining-mike/sessions");
+  const played = router("/mining-mike/sessions");
+  assert.equal(played.state.menus, false, "held back by default");
+  assert.equal(played.href(played.state), "/mining-mike/sessions");
 
   // And it does not ride along into one session, where there is nothing to
   // hide and nothing would drop it again.
-  const one = router("/mining-mike/sessions/sess-a", "?empty=1");
+  const one = router("/mining-mike/sessions/sess-a", "?menus=1");
   assert.equal(one.href(one.state), "/mining-mike/sessions/sess-a");
 });
 
@@ -1639,14 +1640,158 @@ test("every page of a filtered list is filtered the same way", () => {
   // The first page comes from the address and the ones after it come from this
   // query. A cursor that walks a different list than the one on screen skips
   // rows and repeats others, and does it silently.
-  const all = router("/mining-mike/sessions", "?empty=1");
-  assert.equal(all.listQuery("sessions").get("empty"), "1");
+  const all = router("/mining-mike/sessions", "?menus=1");
+  assert.equal(all.listQuery("sessions").get("menus"), "1");
   assert.equal(all.listQuery("sessions").get("game"), "mining-mike");
 
-  const withRuns = router("/mining-mike/sessions");
-  assert.equal(withRuns.listQuery("sessions").get("empty"), null, "and the default carries no flag");
+  const played = router("/mining-mike/sessions");
+  assert.equal(played.listQuery("sessions").get("menus"), null, "and the default carries no flag");
 
   // It belongs to the session list and to nothing else.
-  assert.equal(all.listQuery("reports").get("empty"), null);
-  assert.equal(all.listQuery("signatures").get("empty"), null);
+  assert.equal(all.listQuery("reports").get("menus"), null);
+  assert.equal(all.listQuery("signatures").get("menus"), null);
+});
+
+// ---------------------------------------------------------------------------
+// A session that started a game and never finished one.
+//
+// This is the shape most of a playtest is: open the engine, start a game, hit
+// something, quit. No run summary is ever sent, so every count built on run
+// summaries reads zero, and a page that only counts those says nothing at all
+// about the session where the thing went wrong.
+
+const UNFIN = "session-unfinished";
+
+test("starting a game and finishing one are different questions", async () => {
+  const post = (b) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: UNFIN, version: "dev", ...b }),
+  });
+  // Copied off the live service: a survival session that ran 33 seconds, spent
+  // 26 of them inside a run, reported three errors and no run summary.
+  await post({ kind: "session", message: "open 0m 33s", session: `${UNFIN}-quit`,
+    context: { session_sec: 33, played_sec: 26, mode: "survival", screen: "in_run",
+               run: `${UNFIN}-quit-r1` } });
+  await post({ kind: "error", message: "Required extension VK_KHR_surface not found.",
+    session: `${UNFIN}-quit`, context: { session_sec: 33, played_sec: 26, mode: "survival" } });
+  // And one that never left the menu.
+  await post({ kind: "session", message: "open 2m", session: `${UNFIN}-menus`,
+    context: { session_sec: 120, played_sec: 0, screen: "menu", run: "" } });
+
+  const { sessions, totals } = await (await fetch(`${base}/v1/sessions?game=${UNFIN}`)).json();
+  assert.equal(sessions.length, 1, "the one that got into a game");
+  assert.equal(sessions[0].session, `${UNFIN}-quit`);
+  assert.equal(sessions[0].runs, 0, "it finished nothing");
+  assert.equal(sessions[0].entered, 1, "and it started something, which is the point");
+  assert.equal(totals.unfinished, 1, "counted as what it is");
+  assert.equal(totals.empty, 1, "and the menus-only one is held back, not lost");
+
+  // The old rule held back BOTH of these, and on the live service that was 292
+  // of 500 sessions - including 400 of the 445 that carried a fault.
+  const all = await (await fetch(`${base}/v1/sessions?game=${UNFIN}&menus=1`)).json();
+  assert.equal(all.sessions.length, 2);
+});
+
+test("either half of the evidence is enough to say they got in", async () => {
+  const post = (b) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ game: UNFIN + "-half", version: "dev", ...b }),
+  });
+  // Time inside a run, with no run id.
+  await post({ kind: "session", message: "a", session: "half-played",
+    context: { session_sec: 60, played_sec: 12 } });
+  // A run id, with the clock never having ticked.
+  await post({ kind: "session", message: "b", session: "half-runid",
+    context: { session_sec: 60, played_sec: 0, run: "half-runid-r1" } });
+  // Neither.
+  await post({ kind: "session", message: "c", session: "half-neither",
+    context: { session_sec: 60, played_sec: 0, run: "" } });
+
+  const { sessions } = await (await fetch(`${base}/v1/sessions?game=${UNFIN}-half`)).json();
+  assert.deepEqual(sessions.map((s) => s.session).sort(), ["half-played", "half-runid"]);
+});
+
+test("a session's faults are askable for, which is what the count promised", async () => {
+  // The session list has counted faults per session since it was written, and
+  // the page behind that count had no way to fetch them: it asked only for
+  // runs, so a session with three errors and no runs drew nothing at all.
+  const res = await fetch(`${base}/v1/reports?session=${UNFIN}-quit`);
+  assert.equal(res.status, 200);
+  const { reports } = await res.json();
+  assert.equal(reports.length, 2, "the check-in and the error, and nothing from any other session");
+  assert.ok(reports.every((r) => r.session === `${UNFIN}-quit`));
+  assert.ok(reports.some((r) => r.kind === "error"));
+
+  // And it composes with the other filters rather than replacing them.
+  const errors = await (await fetch(`${base}/v1/reports?session=${UNFIN}-quit&kind=error`)).json();
+  assert.equal(errors.reports.length, 1);
+  assert.equal(errors.reports[0].kind, "error");
+});
+
+test("the session page draws the machine and the faults, with no runs at all", () => {
+  const { sessionAbout, faultCard } = portal();
+  const row = {
+    session: "s", runs: 0, entered: 1, seconds: 33, played: 26, modes: "survival",
+    live: 0, ended_in_crash: 0, platform: "Linux", gpu: "llvmpipe (LLVM 20.1.2, 256 bits)",
+    engine: "4.7.0", version: "dev", channel: "full", player: "",
+    succeeded: 0, failed: 0, quit: 0,
+  };
+  const faults = [
+    { id: "r1", received_at: Date.now(), kind: "error", title: "Required extension VK_KHR_surface not found.", version: "dev" },
+  ];
+  const about = sessionAbout(row, [], faults);
+  // A session with no runs is still a machine and a stretch of an afternoon.
+  assert.match(about, /Linux/);
+  assert.match(about, /llvmpipe/);
+  assert.match(about, /4\.7\.0/);
+  assert.match(about, /survival/, "and survival is a mode like any other");
+  assert.match(about, /left mid-run/, "and this is the thing it is here to say");
+
+  const card = faultCard(faults);
+  assert.match(card, /VK_KHR_surface/);
+  assert.match(card, /reports\/r1/, "each one a link to the report");
+  assert.equal(faultCard([]), "", "and no card at all when nothing went wrong");
+});
+
+test("the runs column tells the two nothings apart", () => {
+  const { sessionRows } = portal();
+  const base = { session: "s", last_seen: Date.now(), seconds: 60, played: 0,
+                 modes: "", faults: 0, live: 0, ended_in_crash: 0,
+                 succeeded: 0, failed: 0, quit: 0, runs: 0, player: "" };
+  // "no runs" was printed for both, and they send somebody to opposite
+  // conclusions: one is a session worth opening and the other is not.
+  assert.match(sessionRows([{ ...base, entered: 1, played: 26 }]), /started, unfinished/);
+  assert.match(sessionRows([{ ...base, entered: 0 }]), /menus only/);
+  assert.match(sessionRows([{ ...base, entered: 1, runs: 2, succeeded: 1, failed: 1 }]),
+    /1 succeeded/, "and a session that finished runs still reads as its outcomes");
+});
+
+test("a session that never got in says so instead", () => {
+  const { sessionAbout } = portal();
+  const about = sessionAbout({
+    session: "s", runs: 0, entered: 0, seconds: 120, played: 0, modes: "",
+    live: 0, ended_in_crash: 0, platform: "Windows", gpu: "", engine: "", version: "dev",
+    succeeded: 0, failed: 0, quit: 0,
+  }, [], []);
+  assert.match(about, /menus only/);
+  assert.ok(!/left mid-run/.test(about), "it never got in, so it never left");
+});
+
+test("every report says which session it came from, and links into it", () => {
+  const { reportRows } = portal();
+  const html = reportRows([{
+    id: "abc", received_at: Date.now(), kind: "crash", title: "boom",
+    version: "dev", session: "sess-xyz", platform: "Linux", player: "",
+  }]);
+  // A crash with no way back to the half hour around it is a crash nobody can
+  // place: which build, which machine, what else was going wrong at the time.
+  assert.match(html, /sessions\/sess-xyz/);
+  assert.match(html, />sess-xyz</);
+  // And a report that carries no session prints a dash rather than a link to
+  // the session list.
+  const none = reportRows([{
+    id: "abc", received_at: Date.now(), kind: "crash", title: "boom",
+    version: "dev", session: "", platform: "Linux", player: "",
+  }]);
+  assert.ok(!/sessions\//.test(none));
 });

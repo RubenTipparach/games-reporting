@@ -329,8 +329,8 @@ const state = {
   view: "signatures", game: "", signature: "", report: null, session: "", mode: "",
   // Which sector the upgrade tally is narrowed to. Empty is all of them.
   sector: "",
-  // Whether the session list is showing the ones that finished no run.
-  empty: false,
+  // Whether the session list is showing the ones that never left the menu.
+  menus: false,
 };
 
 // Whether a game name is one the service carries an entry for. A registered
@@ -370,7 +370,7 @@ function href(s) {
   if (s.view === "upgrades" && s.sector) query.set("sector", s.sector);
   // Only on the session LIST. Inside one session there is nothing to hide, and
   // a flag that rides along into a drill-down is a flag somebody cannot drop.
-  if (s.view === "runs" && !s.session && s.empty) query.set("empty", "1");
+  if (s.view === "runs" && !s.session && s.menus) query.set("menus", "1");
   const tail = query.toString() ? "?" + query.toString() : "";
   if (s.game && registered(s.game)) return "/" + seg(s.game) + path + tail;
   return path + tail;
@@ -383,7 +383,7 @@ function to(patch) {
   return href(Object.assign(
     {
       view: "signatures", game: state.game, signature: "", report: null,
-      session: "", mode: "", sector: "", empty: false,
+      session: "", mode: "", sector: "", menus: false,
     },
     patch));
 }
@@ -402,9 +402,9 @@ function readUrl() {
     game: params.get("game") || "",
     signature: "", report: null, session: "", mode: "",
     sector: params.get("sector") || "",
-    // Sessions that finished no run are off the list unless the address says
-    // otherwise. A filter and not a place, so it is a query.
-    empty: params.get("empty") === "1",
+    // Sessions that never got into a game are off the list unless the address
+    // says otherwise. A filter and not a place, so it is a query.
+    menus: params.get("menus") === "1",
   };
   // A leading segment naming a registered game is the game, and the rest of
   // the path is read exactly as it would be without it. One shift, and every
@@ -600,7 +600,7 @@ function listQuery(kind) {
   // The same filter on the first page and on every page after it. A cursor
   // that walks a different list than the one on screen skips rows and repeats
   // others, and does it silently.
-  if (kind === "sessions" && state.empty) q.set("empty", "1");
+  if (kind === "sessions" && state.menus) q.set("menus", "1");
   return q;
 }
 
@@ -1227,7 +1227,7 @@ async function viewReports() {
   const back = state.signature
     ? '<p class="crumb"><a class="btn" href="' + esc(to({ view: "signatures" })) + '">Back to issues</a>' +
       '<span class="dim">signature ' + esc(state.signature) + '</span></p>' : "";
-  return back + '<table><thead><tr><th>When</th><th>What</th><th>Version</th><th>Platform</th><th>Player</th></tr></thead><tbody>' +
+  return back + '<table><thead><tr><th>When</th><th>What</th><th>Version</th><th>Session</th><th>Platform</th><th>Player</th></tr></thead><tbody>' +
     reportRows(reports) + '</tbody></table>' + moreBar("reports", body.next);
 }
 
@@ -1238,6 +1238,12 @@ function reportRows(reports) {
       '<td><a href="' + esc(to({ report: r.id })) + '">' +
         '<span class="kind-' + esc(r.kind) + '">' + esc(r.kind) + '</span> ' + esc(r.title) + '</a></td>' +
       '<td class="dim">' + esc(r.version || "-") + '</td>' +
+      // The session is on every report and was on no screen. A crash with no
+      // way back to the half hour around it is a crash nobody can place.
+      '<td class="dim">' + (r.session
+        ? '<a href="' + esc(to({ view: "runs", session: r.session })) + '">' +
+          esc(r.session) + '</a>'
+        : "-") + '</td>' +
       '<td class="dim">' + esc(r.platform || "-") + '</td>' +
       '<td class="dim">' + esc(r.player || "-") + '</td>' +
       '</tr>').join("");
@@ -1273,8 +1279,13 @@ function tally(s) {
   if (s.succeeded) parts.push('<span class="outcome-succeeded">' + s.succeeded + ' succeeded</span>');
   if (s.failed) parts.push('<span class="outcome-failed">' + s.failed + ' failed</span>');
   if (s.quit) parts.push('<span class="outcome-quit">' + s.quit + ' quit</span>');
-  if (!parts.length) return '<span class="dim">no runs</span>';
-  return parts.join(' <span class="dim">/</span> ');
+  if (parts.length) return parts.join(' <span class="dim">/</span> ');
+  // TWO different nothings, and "no runs" was being printed for both. A
+  // session that started a game and walked away mid-run is the most common
+  // shape in a playtest and the one worth opening; a session that never left
+  // the menu is neither.
+  if (s.entered) return '<span class="outcome-quit">started, unfinished</span>';
+  return '<span class="dim">menus only</span>';
 }
 
 // LEVEL ONE: every session.
@@ -1292,9 +1303,9 @@ async function viewSessionList() {
     // to opposite conclusions, and the second is the only one that means the
     // game is not reporting.
     return chips + '<div class="empty">' +
-      (t.empty && !state.empty
-        ? 'No session finished a run.' +
-          '<br><span class="dim">' + t.empty + ' opened the game without starting one. ' +
+      (t.empty && !state.menus
+        ? 'No session got into a game.' +
+          '<br><span class="dim">' + t.empty + ' never left the menu. ' +
           'Show them with the button above.</span>'
         : 'No sessions yet.' +
           '<br><span class="dim">The game pings every few minutes while it is open, ' +
@@ -1311,8 +1322,13 @@ async function viewSessionList() {
   const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
       '<dl class="kv"><dt>played</dt><dd>' + (Number(t.sessions) || sessions.length) + '</dd>' +
       '<dt>median length</dt><dd>' + esc(dur(t.median)) + '</dd>' +
-      (t.empty && !state.empty
-        ? '<dt>no runs</dt><dd class="dim">' + t.empty + ' hidden</dd>' : '') +
+      // Started a game and walked away from it. The number a playtest wants
+      // and the one a run count cannot give: not how many runs ended, but how
+      // many attempts nobody saw the end of.
+      (Number(t.unfinished)
+        ? '<dt>started, unfinished</dt><dd>' + t.unfinished + '</dd>' : '') +
+      (t.empty && !state.menus
+        ? '<dt>menus only</dt><dd class="dim">' + t.empty + ' hidden</dd>' : '') +
       '</dl></div>' +
     // Two totals, because they answer different questions: how long was the
     // playtest, and how much game was actually played in it. The share tells
@@ -1352,12 +1368,12 @@ async function viewSessionList() {
 // would toggle between two identical lists.
 function emptyChips(t) {
   if (!t || !t.empty) return "";
-  const chip = (label, on, empty) =>
+  const chip = (label, on, menus) =>
     '<a class="btn mode' + (on ? " on" : "") + '" href="' +
-    esc(to({ view: "runs", empty })) + '">' + esc(label) + '</a>';
+    esc(to({ view: "runs", menus })) + '">' + esc(label) + '</a>';
   return '<p class="dim">Sessions: ' +
-    chip("with runs", !state.empty, false) + " " +
-    chip("all (" + t.empty + " with none)", !!state.empty, true) + '</p>';
+    chip("got into a game", !state.menus, false) + " " +
+    chip("all (" + t.empty + " menus only)", !!state.menus, true) + '</p>';
 }
 
 function sessionRows(sessions) {
@@ -1386,6 +1402,91 @@ function sessionRows(sessions) {
     '</tr>').join("");
 }
 
+// The kinds that are things going wrong. The same three the issue rollup
+// counts, named here so the session page and that rollup cannot disagree about
+// what a fault is.
+const FAULTS = ["crash", "error", "warning"];
+
+// The session list's own row for one session, which is where the machine, the
+// two clocks and the entered flag are already worked out. Fetched rather than
+// recomputed, so the drill-down and the list agree by construction.
+//
+// Null on anything that goes wrong: this is context around the page, never the
+// page itself, and a session that cannot be found in the list is still a
+// session somebody can read the reports of.
+async function sessionRow(session) {
+  const q = new URLSearchParams({ limit: "500", menus: "1" });
+  if (state.game) q.set("game", state.game);
+  try {
+    const { sessions } = await api("/v1/sessions?" + q.toString());
+    return sessions.find((s) => s.session === session) || null;
+  } catch (e) {
+    void e;
+    return null;
+  }
+}
+
+// WHAT THIS SESSION WAS: how long, on what, and how far it got. The blocks a
+// session page can always draw, because every one of them survives a session
+// that finished nothing.
+function sessionAbout(row, runs, faults) {
+  if (!row) return "";
+  const started = !row.runs && row.entered;
+  const blocks = [];
+
+  blocks.push('<div class="block"><h4>Session</h4><dl class="kv">' +
+    '<dt>app open</dt><dd>' + esc(row.seconds ? dur(row.seconds) : "-") + '</dd>' +
+    '<dt>in game</dt><dd>' + esc(row.played ? dur(row.played) : "-") + '</dd>' +
+    '<dt>runs finished</dt><dd>' + (row.runs || 0) + '</dd>' +
+    '<dt>faults</dt><dd class="' + (faults.length ? "crashy" : "dim") + '">' +
+      (faults.length || 0) + '</dd>' +
+    (row.modes ? '<dt>mode</dt><dd>' + esc(row.modes) + '</dd>' : '') +
+    '</dl></div>');
+
+  // STARTED AND NEVER FINISHED, said out loud. It is the shape of most of a
+  // playtest - open the engine, start a game, hit something, quit - and it
+  // reads as an empty session everywhere that counts only run summaries.
+  blocks.push('<div class="block"><h4>How it went</h4><dl class="kv">' +
+    '<dt>ended</dt><dd>' + (row.live
+      ? '<span class="outcome-live">still open</span>'
+      : row.ended_in_crash
+        ? '<span class="outcome-crashed">in a crash</span>'
+        : '<span class="dim">closed</span>') + '</dd>' +
+    (started
+      ? '<dt>got into a game</dt><dd><span class="outcome-quit">and left mid-run</span></dd>'
+      : row.entered ? '' : '<dt>got into a game</dt><dd class="dim">no, menus only</dd>') +
+    (runs.length ? '<dt>outcomes</dt><dd>' + tally(row) + '</dd>' : '') +
+    '</dl></div>');
+
+  blocks.push('<div class="block"><h4>Machine</h4><dl class="kv">' +
+    '<dt>platform</dt><dd>' + esc(row.platform || "-") + '</dd>' +
+    '<dt>gpu</dt><dd>' + esc(row.gpu || "-") + '</dd>' +
+    '<dt>engine</dt><dd>' + esc(row.engine || "-") + '</dd>' +
+    '<dt>build</dt><dd>' + esc(row.version || "-") +
+      (row.channel ? ' <span class="dim">' + esc(row.channel) + '</span>' : '') + '</dd>' +
+    (row.player ? '<dt>player</dt><dd>' + esc(row.player) + '</dd>' : '') +
+    '</dl></div>');
+
+  return '<div class="blocks">' + blocks.join("") + '</div>';
+}
+
+// The faults this session reported, newest first, each a link to the report.
+// The count was on the session list all along and led to a page that never
+// mentioned it.
+function faultCard(faults) {
+  if (!faults.length) return "";
+  return '<div class="card"><h2>Faults</h2>' +
+    '<table><thead><tr><th>When</th><th>What</th><th>Build</th></tr></thead><tbody>' +
+    faults.map((r) =>
+      '<tr data-href="' + esc(to({ report: r.id })) + '">' +
+      '<td class="dim" title="' + esc(when(r.received_at)) + '">' + esc(ago(r.received_at)) + '</td>' +
+      '<td><a href="' + esc(to({ report: r.id })) + '">' +
+        '<span class="kind-' + esc(r.kind) + '">' + esc(r.kind) + '</span> ' +
+        esc(r.title) + '</a></td>' +
+      '<td class="dim">' + esc(r.version || "-") + '</td>' +
+      '</tr>').join("") + '</tbody></table></div>';
+}
+
 async function viewOneSession() {
   const q = new URLSearchParams({ session: state.session });
   // The game, so the service can look up where THIS game keeps the order its
@@ -1394,7 +1495,18 @@ async function viewOneSession() {
   // is one game's word.
   if (state.game) q.set("game", state.game);
   if (state.mode) q.set("mode", state.mode);
-  const { runs } = await api("/v1/runs?" + q.toString());
+  // Three questions at once, because the answer to the first is often "none"
+  // and the page still has to say something. The session list has counted
+  // faults per session since it was written; this is the first time the page
+  // behind that count could ask for them.
+  const faultQ = new URLSearchParams({ session: state.session, limit: "200" });
+  if (state.game) faultQ.set("game", state.game);
+  const [{ runs }, reports, row] = await Promise.all([
+    api("/v1/runs?" + q.toString()),
+    api("/v1/reports?" + faultQ.toString()).then((b) => b.reports).catch(() => []),
+    sessionRow(state.session),
+  ]);
+  const faults = reports.filter((r) => FAULTS.includes(r.kind));
 
   const crumb = '<p class="crumb"><a class="btn" href="' + esc(to({ view: "runs" })) + '">All sessions</a>' +
     '<span class="dim">session ' + esc(state.session) + '</span>' +
@@ -1404,10 +1516,23 @@ async function viewOneSession() {
       : "") +
     '</p>';
 
+  // Drawn whether or not a run finished. A session that reported nothing but a
+  // check-in and three errors is still a machine, a build, and a stretch of
+  // somebody's afternoon, and a page that says "no runs" and stops throws all
+  // of that away.
+  const about = sessionAbout(row, runs, faults);
+
   if (!runs.length) {
-    return crumb + '<div class="empty">This session finished no runs.' +
-      '<br><span class="dim">It was open long enough to ping, but nothing reached the end of a depth. ' +
-      'That is itself worth knowing.</span></div>';
+    return crumb + about + faultCard(faults) +
+      '<div class="empty">' +
+      (row && row.entered
+        ? 'This session started a game and never finished one.' +
+          '<br><span class="dim">No run summary was sent, so there is nothing to lay out here. ' +
+          'What it was doing is above.</span>'
+        : 'This session finished no runs.' +
+          '<br><span class="dim">It was open long enough to ping, but nothing reached the end of a depth. ' +
+          'That is itself worth knowing.</span>') +
+      '</div>';
   }
 
   // Level two: the modes present, as filters. Only shown when there is a
@@ -1546,7 +1671,8 @@ async function viewOneSession() {
     }).join("") +
     '</div></div>';
 
-  return crumb + modeBar + bars + sessionBuildOrders(runs, state.game) + table;
+  return crumb + about + faultCard(faults) + modeBar + bars +
+    sessionBuildOrders(runs, state.game) + table;
 }
 
 // The context blocks, drawn from the GAME REGISTRY rather than from a list of

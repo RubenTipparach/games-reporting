@@ -398,6 +398,7 @@ function handleRequest(req, res, url) {
       game: q.get("game") || undefined,
       kind: q.get("kind") || undefined,
       signature: q.get("signature") || undefined,
+      session: q.get("session") || undefined,
       before: q.get("before") ? Number(q.get("before")) : undefined,
       beforeId: q.get("before_id") || undefined,
       limit,
@@ -480,15 +481,18 @@ function handleRequest(req, res, url) {
     const before = q.get("before") ? Number(q.get("before")) : undefined;
     const shared = {
       game: q.get("game") || undefined,
-      // Sessions that finished no run are held back unless asked for. Somebody
-      // opening the game and closing it again is worth counting and is not
-      // worth a row, and at a few hundred sessions they were most of the list.
+      // Sessions that NEVER LEFT THE MENU are held back unless asked for.
+      //
+      // Not "sessions with no runs", which is what this held back first and
+      // which quietly hid most of a playtest: somebody who starts a game and
+      // quits before finishing sends no run summary either, and those are the
+      // sessions with the crashes in them.
       //
       // Held back HERE rather than on the page, so that a page of fifty is
       // fifty rows somebody wants: a client-side filter would take fifty from
       // the service and draw twelve, and the cursor would be paging the wrong
       // list.
-      withEmpty: q.get("empty") === "1",
+      withEmpty: q.get("menus") === "1",
       // The window a session has to check in inside to still count as
       // running. Both halves come from config so they can be moved with the
       // game's own heartbeat rather than by editing a query.

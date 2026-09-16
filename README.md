@@ -302,13 +302,18 @@ it and should not.
 
 ### Which sessions are worth a row
 
-Most sessions are somebody opening the game and closing it again. `GET
-/v1/sessions` holds those back and says how many it is holding:
+A run summary is sent when a run **ends**. Somebody who starts a game and quits
+mid-run sends none, so counting run summaries reads zero for them - and that is
+most of a playtest. The rollup carries `entered` beside `runs`, and only the
+sessions that never got into a game at all are held back:
 
 ```
-/v1/sessions?game=mining-mike           the ones that finished a run
-/v1/sessions?game=mining-mike&empty=1   all of them
+/v1/sessions?game=mining-mike           the ones that got into a game
+/v1/sessions?game=mining-mike&menus=1   all of them
 ```
+
+Three states rather than two: finished runs, **started and unfinished**, and
+menus only. The middle one is the shape with the crashes in it.
 
 It pages like the other lists, on a `(last_seen, session)` cursor, and carries
 `totals` on the first page only: the count, the playtime, the median length and
@@ -320,6 +325,16 @@ The filter is applied in SQL rather than on the page for the same reason: a
 page of fifty should be fifty rows somebody wants. Filtered after the fact it
 would be fifty rows taken off the service and however many of them happened to
 qualify, with the cursor paging a list nobody is looking at.
+
+### One session's reports
+
+`GET /v1/reports?session=<id>` is every report that session sent, and composes
+with `kind` and `game`. The session list has counted faults per session since
+it was written; this filter is what lets the page behind that count show them.
+
+A session drill-down draws the machine, the build, the two clocks and those
+faults before it draws any runs, so a session that finished nothing still says
+what it was and what went wrong.
 
 A session's runs are one game's runs, so the drill-down passes the game along
 and the service looks up where that game keeps its picks. Asking for every
