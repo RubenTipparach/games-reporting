@@ -93,6 +93,27 @@ function sessionRollup(filter, having) {
                  MAX(COALESCE(json_extract(context, '$.session_sec'), 0)) AS seconds,
                  MAX(COALESCE(json_extract(context, '$.played_sec'), 0))  AS played,
                  MAX(COALESCE(json_extract(context, '$.channel'), '')) AS channel,
+                 -- What it was running on. A session that finished no run
+                 -- still has a machine, and on a page that would otherwise be
+                 -- blank that is most of what there is to say.
+                 MAX(COALESCE(platform, '')) AS platform,
+                 MAX(COALESCE(gpu, ''))      AS gpu,
+                 MAX(COALESCE(engine, ''))   AS engine,
+                 -- DID THEY EVER GET INTO A GAME.
+                 --
+                 -- Not the same question as "did they finish a run", and the
+                 -- gap between the two is most of a playtest: somebody opens
+                 -- the engine, starts a game, hits something, and quits. No run
+                 -- summary is ever sent, so the run count is zero, and reading
+                 -- that as "nothing happened" throws away the session where the
+                 -- thing went wrong.
+                 --
+                 -- Both halves are generic: played_sec is time inside a run
+                 -- and run is the id of one that was begun, and every game
+                 -- that reports at all reports both.
+                 MAX(CASE WHEN COALESCE(json_extract(context, '$.played_sec'), 0) > 0
+                            OR COALESCE(json_extract(context, '$.run'), '') <> ''
+                          THEN 1 ELSE 0 END) AS entered,
                  -- What they played. A session can hold both, so this is the
                  -- set rather than a single value.
                  GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
@@ -237,7 +258,7 @@ export function openDatabase(dataDir) {
     //
     // The pair is unique because the id is, so the order is total and every
     // row sits in exactly one page.
-    list({ game, kind, signature, before, beforeId, limit = 50 } = {}) {
+    list({ game, kind, signature, session, before, beforeId, limit = 50 } = {}) {
       const where = [];
       const args = {};
       if (game) {
@@ -251,6 +272,13 @@ export function openDatabase(dataDir) {
       if (signature) {
         where.push("signature = @signature");
         args.signature = signature;
+      }
+      // One session's reports. The session list has counted faults per session
+      // since it was written and the drill-down had no way to ask for them, so
+      // it showed a count on one page and nothing at all on the next.
+      if (session) {
+        where.push("session = @session");
+        args.session = session;
       }
       if (before) {
         args.before = before;
@@ -423,13 +451,19 @@ export function openDatabase(dataDir) {
       // rollup's cursor is: `runs` and `last_seen` are aggregates, and neither
       // exists until the rows are grouped.
       const tests = [];
-      // A session that finished no run is somebody who opened the game, looked
-      // at it, and closed it again. Worth counting and not worth a row.
+      // The rows held back are the ones that NEVER LEFT THE MENU.
+      //
+      // This used to hold back every session with no run summary, and that was
+      // wrong in the most expensive way available: a session that started a
+      // game and quit before finishing it sends no run summary either, and
+      // those are most of a playtest and most of the crashes. On the live
+      // service it was hiding 292 of 500 sessions, and 400 of the 445 that
+      // carried a fault.
       //
       // Defaults to INCLUDING them here and to excluding them at the route,
       // which is the right way round: a store hands back what is in the table,
       // and which of it is worth a screenful is a decision about the product.
-      if (!withEmpty) tests.push("runs > 0");
+      if (!withEmpty) tests.push("(runs > 0 OR entered = 1)");
       if (before) {
         // `session` is the GROUP BY key and so is unique per row, which makes
         // (last_seen, session) a total order the same way (received_at, id) is
@@ -460,7 +494,7 @@ export function openDatabase(dataDir) {
     sessionTotals({ game, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
       const args = { now, staleAfter };
       const filter = sessionFilter(game, args);
-      const shown = sessionRollup(filter, withEmpty ? "" : "HAVING runs > 0");
+      const shown = sessionRollup(filter, withEmpty ? "" : "HAVING (runs > 0 OR entered = 1)");
       const totals = db.prepare(`
         SELECT COUNT(*)                          AS sessions,
                COALESCE(SUM(seconds), 0)         AS seconds,
@@ -468,14 +502,19 @@ export function openDatabase(dataDir) {
                COALESCE(SUM(live), 0)            AS live,
                COALESCE(SUM(CASE WHEN live = 0 THEN 1 ELSE 0 END), 0) AS ended,
                COALESCE(SUM(CASE WHEN live = 0 AND ended_in_crash = 1 THEN 1 ELSE 0 END), 0)
-                                                 AS crashed
+                                                 AS crashed,
+               -- Started a game and never finished one. The number a playtest
+               -- actually wants: not how many runs ended, but how many attempts
+               -- walked away mid-run.
+               COALESCE(SUM(CASE WHEN runs = 0 AND entered = 1 THEN 1 ELSE 0 END), 0)
+                                                 AS unfinished
         FROM (${shown})
       `).get(args);
-      // How many rows the runs filter is keeping off the list. Reported even
-      // when nothing is being hidden, because "0 with no runs" and "we are not
-      // filtering" are the same screen and different facts.
+      // How many rows the filter is keeping off the list. Reported even when
+      // nothing is being hidden, because "none that stayed in the menu" and
+      // "we are not filtering" are the same screen and different facts.
       const empty = db.prepare(`
-        SELECT COUNT(*) AS n FROM (${sessionRollup(filter, "HAVING runs = 0")})
+        SELECT COUNT(*) AS n FROM (${sessionRollup(filter, "HAVING runs = 0 AND entered = 0")})
       `).get(args).n;
       // The middle session, over the same set as the rest of these. The two
       // middles averaged on an even count, which is the definition the page
