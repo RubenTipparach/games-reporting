@@ -323,7 +323,10 @@ test("a marker crash is only an ending if nothing checked in after it", () => {
 });
 
 test("the window comes from config, so it can follow the game's interval", async () => {
-  const res = await fetch(`${base}/v1/sessions?game=${LIVE}&limit=50`);
+  // empty=1 because these fixtures are check-ins with no runs behind them, and
+  // the route holds those back now. What is being tested here is the liveness
+  // window, not which rows are worth a screenful.
+  const res = await fetch(`${base}/v1/sessions?game=${LIVE}&limit=50&empty=1`);
   assert.equal(res.status, 200);
   const { sessions } = await res.json();
   const row = sessions.find((s) => s.session === "still-here");
@@ -717,7 +720,8 @@ function router(pathname, search = "") {
     src + "\n;return { state, href, to, readUrl, GAMES," +
       " effectAt, upgradeName, upgradeArt, upgradeTip," +
       " picksOf, buildOrder, pickTip, runPlace," +
-      " statsCard, statPair, statPlot, statRows, statChange, statValue };",
+      " statsCard, statPair, statPlot, statRows, statChange, statValue," +
+      " listQuery, sessionRows };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -848,7 +852,8 @@ test("a session that closed normally is not marked as crashed", async () => {
     body: JSON.stringify({ game: "pt", kind: "session", message: "played for 5m",
       session: "sess-b", context: { session_sec: 300, mode: "survival" } }),
   });
-  const { sessions } = await fetch(`${base}/v1/sessions?game=pt`).then((r) => r.json());
+  // A heartbeat and nothing else, so it is one of the rows the list holds back.
+  const { sessions } = await fetch(`${base}/v1/sessions?game=pt&empty=1`).then((r) => r.json());
   const b = sessions.find((s) => s.session === "sess-b");
   assert.equal(b.ended_in_crash, 0);
   assert.equal(b.seconds, 300);
@@ -883,7 +888,7 @@ test("a session reports both clocks, and they are different numbers", async () =
   await post({ game: "clocks", kind: "session", message: "open 90m, 20m in game",
     session: "sess-clock", context: { session_sec: 5400, played_sec: 1200, mode: "campaign" } });
 
-  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks`).then((r) => r.json());
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&empty=1`).then((r) => r.json());
   const c = sessions.find((s) => s.session === "sess-clock");
   assert.equal(c.seconds, 5400, "the whole time the exe was up");
   assert.equal(c.played, 1200, "and the part of it inside a run");
@@ -896,7 +901,7 @@ test("a session with no runs reports open time and zero play time", async () => 
     body: JSON.stringify({ game: "clocks", kind: "session", message: "open 9m",
       session: "sess-menus", context: { session_sec: 546, played_sec: 0 } }),
   });
-  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks`).then((r) => r.json());
+  const { sessions } = await fetch(`${base}/v1/sessions?game=clocks&empty=1`).then((r) => r.json());
   const m = sessions.find((s) => s.session === "sess-menus");
   assert.equal(m.seconds, 546);
   assert.equal(m.played, 0, "nine minutes of shell, and the table should say so");
@@ -1434,4 +1439,214 @@ test("an axis that claims a shared scale has to name the unit", () => {
   assert.throws(bad({ path: "a-b" }), /not a context path/);
   assert.doesNotThrow(bad({ lead: "dps", axis: { unit: "dps", rows: [["dps", "on target"]] } }));
   assert.doesNotThrow(() => checkStats({ id: "x" }), "a game with no such readout is fine");
+});
+
+// ---------------------------------------------------------------------------
+// The session list: what is worth a row, and how to get the next fifty.
+//
+// A few hundred sessions in, most of them were somebody opening the game and
+// closing it again. Those are worth counting and are not worth a screenful,
+// so they are held back, counted, and one click away.
+
+const SESS = "session-paging";
+
+async function postSession(session, extra = {}, kind = "session") {
+  const res = await fetch(`${base}/v1/reports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: SESS, version: "1.0.0", kind, message: kind + " for " + session,
+      session, context: { session_sec: 600, played_sec: 300, ...extra },
+    }),
+  });
+  assert.equal(res.status, 201);
+}
+
+// Six that played and four that did not, built by hand rather than sampled:
+// the counts below are the point, and a fixture that happens to contain some
+// of each is not a fixture.
+//
+// Seeded on FIRST USE rather than at module scope. Two tests near the top of
+// this file assert on the whole table - one report listed, zero left after the
+// delete - and sixteen rows posted while the file loads arrive before either of
+// them runs. Memoised, so the order these tests are declared in is the only
+// thing that has to hold.
+let seeded = null;
+function seedSessions() {
+  if (!seeded) {
+    seeded = (async () => {
+      for (let i = 0; i < 6; i++) {
+        await postSession(`${SESS}-ran-${i}`);
+        await postSession(`${SESS}-ran-${i}`,
+          { mode: "campaign", outcome: "failed", run_seconds: 120 }, "run");
+      }
+      for (let i = 0; i < 4; i++) {
+        await postSession(`${SESS}-idle-${i}`, { played_sec: 0 });
+      }
+    })();
+  }
+  return seeded;
+}
+
+test("a session that finished no run is held back, and counted", async () => {
+  await seedSessions();
+  const shown = await (await fetch(`${base}/v1/sessions?game=${SESS}`)).json();
+  assert.equal(shown.sessions.length, 6, "only the ones that played");
+  assert.ok(shown.sessions.every((s) => s.runs > 0));
+  // Held back rather than dropped: the header says how many, so the button
+  // that shows them is an informed click rather than a guess.
+  assert.equal(shown.totals.empty, 4);
+  assert.equal(shown.totals.sessions, 6, "and the totals describe what is listed");
+
+  const all = await (await fetch(`${base}/v1/sessions?game=${SESS}&empty=1`)).json();
+  assert.equal(all.sessions.length, 10);
+  assert.equal(all.totals.sessions, 10, "the totals follow the filter");
+  assert.equal(all.totals.empty, 4, "and still say how many have no runs");
+});
+
+test("the filter is held on the service, so a page is a page of rows somebody wants", async () => {
+  await seedSessions();
+  // The whole reason this is not a client-side filter: asking for four and
+  // getting four. A page filtered after the fact would have taken four rows
+  // off the service and drawn however many of them happened to qualify.
+  const page = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=4`)).json();
+  assert.equal(page.sessions.length, 4);
+  assert.ok(page.sessions.every((s) => s.runs > 0));
+  assert.ok(page.next, "and a cursor, because the page came back full");
+});
+
+test("the session cursor walks the list once, losing and repeating nothing", async () => {
+  await seedSessions();
+  const seen = [];
+  let cursor;
+  for (let page = 0; page < 20; page++) {
+    const q = new URLSearchParams({ game: SESS, limit: "3", empty: "1" });
+    if (cursor) {
+      q.set("before", String(cursor.before));
+      q.set("before_id", String(cursor.before_id));
+    }
+    const body = await (await fetch(`${base}/v1/sessions?${q}`)).json();
+    seen.push(...body.sessions.map((s) => s.session));
+    cursor = body.next;
+    if (!cursor) break;
+  }
+  assert.equal(seen.length, 10, "every session, once");
+  assert.equal(new Set(seen).size, 10, "and none of them twice");
+
+  // The order the cursor walks is the order the list is drawn in.
+  const ordered = [...seen];
+  assert.deepEqual(seen, ordered);
+
+  // The totals ride on the first page only: a number describing the whole list
+  // does not change as somebody walks down it.
+  const first = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=3&empty=1`)).json();
+  assert.ok(first.totals);
+  const second = await (await fetch(
+    `${base}/v1/sessions?game=${SESS}&limit=3&empty=1` +
+    `&before=${first.next.before}&before_id=${first.next.before_id}`)).json();
+  assert.ok(!second.totals, "and are not recounted for every page");
+});
+
+test("the totals describe the whole list, not the page on screen", async () => {
+  await seedSessions();
+  // This is what a header is FOR. Worked out from the rows that came back, a
+  // crash rate would move every time somebody pressed Load more.
+  const page = await (await fetch(`${base}/v1/sessions?game=${SESS}&limit=2`)).json();
+  assert.equal(page.sessions.length, 2, "two rows");
+  assert.equal(page.totals.sessions, 6, "six sessions");
+  assert.equal(page.totals.seconds, 6 * 600, "and the playtime of all six");
+  assert.equal(page.totals.played, 6 * 300);
+  assert.equal(page.totals.median, 600);
+});
+
+test("the totals and the rows come from one grouped SELECT", async () => {
+  await seedSessions();
+  // Two copies of that grouping is how a header ends up disagreeing with the
+  // table under it, so this asserts they agree on a set small enough to add up
+  // by hand.
+  const now = Date.now();
+  const rows = store.sessions({ game: SESS, now, staleAfter: 600_000, limit: 500 });
+  const t = store.sessionTotals({ game: SESS, now, staleAfter: 600_000 });
+  assert.equal(t.sessions, rows.length);
+  assert.equal(t.seconds, rows.reduce((n, s) => n + s.seconds, 0));
+  assert.equal(t.played, rows.reduce((n, s) => n + s.played, 0));
+  assert.equal(t.live, rows.filter((s) => s.live).length);
+  assert.equal(t.ended, rows.filter((s) => !s.live).length);
+  assert.equal(t.empty, rows.filter((s) => !s.runs).length);
+
+  const withRuns = store.sessions({ game: SESS, now, staleAfter: 600_000, limit: 500, withEmpty: false });
+  const tRuns = store.sessionTotals({ game: SESS, now, staleAfter: 600_000, withEmpty: false });
+  assert.equal(tRuns.sessions, withRuns.length);
+  assert.equal(tRuns.empty, 4, "the count of what is being held back does not follow the filter");
+});
+
+test("the list's filter is in the address, and only on the list", () => {
+  // A filter is a query rather than a place, the same way the sector is, so a
+  // link to it opens on the screenful somebody was looking at.
+  const all = router("/mining-mike/sessions", "?empty=1");
+  assert.equal(all.state.empty, true);
+  assert.equal(all.href(all.state), "/mining-mike/sessions?empty=1");
+
+  const runs = router("/mining-mike/sessions");
+  assert.equal(runs.state.empty, false, "held back by default");
+  assert.equal(runs.href(runs.state), "/mining-mike/sessions");
+
+  // And it does not ride along into one session, where there is nothing to
+  // hide and nothing would drop it again.
+  const one = router("/mining-mike/sessions/sess-a", "?empty=1");
+  assert.equal(one.href(one.state), "/mining-mike/sessions/sess-a");
+});
+
+test("the session cursor survives a tie, because last_seen alone is not an order", async () => {
+  // BUILT, not sampled. Five sessions whose last report lands on the SAME
+  // millisecond, written down here rather than hoped for: posting ten over HTTP
+  // gave ten distinct timestamps, so the tie the cursor has to survive never
+  // happened and the tiebreak was never under test.
+  const TIED = "session-tie";
+  const at = 1_800_000_000_000;
+  for (const n of ["e", "d", "c", "b", "a"]) {
+    store.insert({
+      id: `${TIED}-${n}`, received_at: at, game: TIED, version: "1.0.0",
+      kind: "run", signature: "sig-tie", title: "ran", message: "ran", stack: "",
+      log: "", platform: "", gpu: "", engine: "", session: `${TIED}-${n}`,
+      player: "", context: JSON.stringify({ outcome: "failed", session_sec: 60 }),
+    });
+  }
+
+  const seen = [];
+  let cursor;
+  for (let page = 0; page < 20; page++) {
+    const q = new URLSearchParams({ game: TIED, limit: "2" });
+    if (cursor) {
+      q.set("before", String(cursor.before));
+      q.set("before_id", String(cursor.before_id));
+    }
+    const body = await (await fetch(`${base}/v1/sessions?${q}`)).json();
+    seen.push(...body.sessions.map((s) => s.session));
+    cursor = body.next;
+    if (!cursor) break;
+  }
+  // Without the (last_seen, session) tiebreak the second page asks for rows
+  // strictly older than a timestamp four other rows share, and those four are
+  // gone with no sign that they ever existed.
+  assert.equal(seen.length, 5, "every tied session, once");
+  assert.equal(new Set(seen).size, 5, "and none of them twice");
+  assert.deepEqual(seen, [`${TIED}-e`, `${TIED}-d`, `${TIED}-c`, `${TIED}-b`, `${TIED}-a`],
+    "walked in the order the list is drawn in");
+});
+
+test("every page of a filtered list is filtered the same way", () => {
+  // The first page comes from the address and the ones after it come from this
+  // query. A cursor that walks a different list than the one on screen skips
+  // rows and repeats others, and does it silently.
+  const all = router("/mining-mike/sessions", "?empty=1");
+  assert.equal(all.listQuery("sessions").get("empty"), "1");
+  assert.equal(all.listQuery("sessions").get("game"), "mining-mike");
+
+  const withRuns = router("/mining-mike/sessions");
+  assert.equal(withRuns.listQuery("sessions").get("empty"), null, "and the default carries no flag");
+
+  // It belongs to the session list and to nothing else.
+  assert.equal(all.listQuery("reports").get("empty"), null);
+  assert.equal(all.listQuery("signatures").get("empty"), null);
 });

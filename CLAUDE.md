@@ -184,7 +184,8 @@ somebody does with this service is paste a link at somebody else:
 ```
 /mining-mike/issues            /mining-mike/issues/<signature>
 /mining-mike/reports           /mining-mike/reports/<id>
-/mining-mike/sessions          /mining-mike/sessions/<session>/<mode>
+/mining-mike/sessions          ?empty=1 adds the ones that finished no run
+/mining-mike/sessions/<session>/<mode>
 /mining-mike/upgrades          ?sector=<name> narrows it
 /issues                        the same pages across every game
 ```
@@ -197,6 +198,15 @@ Two rules fall out of this and are worth keeping:
 
 - **Paging never touches the address.** What is shareable is the view, not how
   far somebody scrolled it.
+- **A filter belongs on the service, not on the page.** The session list hides
+  the sessions that finished no run, and it hides them in SQL: a filter applied
+  after a page arrives takes fifty rows off the service and draws twelve, and
+  the cursor is then paging a different list than the one on screen. The same
+  filter has to ride on every page, which is what `listQuery()` is for.
+- **A header describes the list, not the page.** The session totals are their
+  own query over the whole filtered set, from the same grouped SELECT the rows
+  come from. Worked out from the rows on screen, a crash rate would move every
+  time somebody pressed Load more.
 - **A drill-down keeps the game.** Dropping it on the way into an issue is how
   somebody ends up reading another game's reports without noticing.
 

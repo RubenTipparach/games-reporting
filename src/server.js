@@ -476,15 +476,38 @@ function handleRequest(req, res, url) {
   if (path === "/v1/sessions" && req.method === "GET") {
     if (!requireKey(req, res)) return undefined;
     const q = url.searchParams;
+    const limit = pageLimit(q.get("limit"), PAGE.sessions);
+    const before = q.get("before") ? Number(q.get("before")) : undefined;
+    const shared = {
+      game: q.get("game") || undefined,
+      // Sessions that finished no run are held back unless asked for. Somebody
+      // opening the game and closing it again is worth counting and is not
+      // worth a row, and at a few hundred sessions they were most of the list.
+      //
+      // Held back HERE rather than on the page, so that a page of fifty is
+      // fifty rows somebody wants: a client-side filter would take fifty from
+      // the service and draw twelve, and the cursor would be paging the wrong
+      // list.
+      withEmpty: q.get("empty") === "1",
+      // The window a session has to check in inside to still count as
+      // running. Both halves come from config so they can be moved with the
+      // game's own heartbeat rather than by editing a query.
+      staleAfter: config.heartbeatSeconds * config.heartbeatStaleFactor * 1000,
+    };
+    const sessions = store.sessions({
+      ...shared,
+      limit,
+      before,
+      beforeId: q.get("before_id") || undefined,
+    });
+    const next = nextCursor(sessions, limit, "last_seen", "session");
     return send(res, 200, {
-      sessions: store.sessions({
-        game: q.get("game") || undefined,
-        limit: pageLimit(q.get("limit"), PAGE.sessions),
-        // The window a session has to check in inside to still count as
-        // running. Both halves come from config so they can be moved with the
-        // game's own heartbeat rather than by editing a query.
-        staleAfter: config.heartbeatSeconds * config.heartbeatStaleFactor * 1000,
-      }),
+      sessions,
+      // Only on the first page. The totals describe the whole list however far
+      // down it somebody is, so re-counting them for every Load more would be
+      // three queries spent confirming a number already on screen.
+      ...(before ? {} : { totals: store.sessionTotals(shared) }),
+      ...(next ? { next } : {}),
     });
   }
 

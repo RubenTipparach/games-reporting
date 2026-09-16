@@ -329,6 +329,8 @@ const state = {
   view: "signatures", game: "", signature: "", report: null, session: "", mode: "",
   // Which sector the upgrade tally is narrowed to. Empty is all of them.
   sector: "",
+  // Whether the session list is showing the ones that finished no run.
+  empty: false,
 };
 
 // Whether a game name is one the service carries an entry for. A registered
@@ -366,6 +368,9 @@ function href(s) {
   const query = new URLSearchParams();
   if (s.game && !registered(s.game)) query.set("game", s.game);
   if (s.view === "upgrades" && s.sector) query.set("sector", s.sector);
+  // Only on the session LIST. Inside one session there is nothing to hide, and
+  // a flag that rides along into a drill-down is a flag somebody cannot drop.
+  if (s.view === "runs" && !s.session && s.empty) query.set("empty", "1");
   const tail = query.toString() ? "?" + query.toString() : "";
   if (s.game && registered(s.game)) return "/" + seg(s.game) + path + tail;
   return path + tail;
@@ -376,7 +381,10 @@ function href(s) {
 // up reading another game's reports without noticing.
 function to(patch) {
   return href(Object.assign(
-    { view: "signatures", game: state.game, signature: "", report: null, session: "", mode: "", sector: "" },
+    {
+      view: "signatures", game: state.game, signature: "", report: null,
+      session: "", mode: "", sector: "", empty: false,
+    },
     patch));
 }
 
@@ -394,6 +402,9 @@ function readUrl() {
     game: params.get("game") || "",
     signature: "", report: null, session: "", mode: "",
     sector: params.get("sector") || "",
+    // Sessions that finished no run are off the list unless the address says
+    // otherwise. A filter and not a place, so it is a query.
+    empty: params.get("empty") === "1",
   };
   // A leading segment naming a registered game is the game, and the rest of
   // the path is read exactly as it would be without it. One shift, and every
@@ -586,6 +597,10 @@ function listQuery(kind) {
   const q = new URLSearchParams();
   if (state.game) q.set("game", state.game);
   if (kind === "reports" && state.signature) q.set("signature", state.signature);
+  // The same filter on the first page and on every page after it. A cursor
+  // that walks a different list than the one on screen skips rows and repeats
+  // others, and does it silently.
+  if (kind === "sessions" && state.empty) q.set("empty", "1");
   return q;
 }
 
@@ -632,7 +647,9 @@ async function loadMore(btn) {
   const tbody = app.querySelector("tbody");
   if (tbody && rows.length) {
     tbody.insertAdjacentHTML("beforeend",
-      kind === "signatures" ? sigRows(rows) : reportRows(rows));
+      kind === "signatures" ? sigRows(rows)
+        : kind === "sessions" ? sessionRows(rows)
+          : reportRows(rows));
   }
   if (body.next) {
     btn.dataset.before = body.next.before;
@@ -1262,31 +1279,41 @@ function tally(s) {
 
 // LEVEL ONE: every session.
 async function viewSessionList() {
-  const q = state.game ? "?game=" + encodeURIComponent(state.game) : "";
-  const { sessions } = await api("/v1/sessions" + q);
+  const body = await api("/v1/sessions?" + listQuery("sessions").toString());
+  const sessions = body.sessions;
+  // The totals describe the WHOLE list, not the rows that came back, so the
+  // crash rate is the crash rate however far down somebody has loaded. Working
+  // it out from the page was fine while one page was all there was.
+  const t = body.totals || {};
+  const chips = emptyChips(t);
+
   if (!sessions.length) {
-    return '<div class="empty">No sessions yet.' +
-      '<br><span class="dim">The game pings every few minutes while it is open, ' +
-      'so a session appears as soon as somebody plays for that long.</span></div>';
+    // Two different nothings. "None with runs" and "none at all" send somebody
+    // to opposite conclusions, and the second is the only one that means the
+    // game is not reporting.
+    return chips + '<div class="empty">' +
+      (t.empty && !state.empty
+        ? 'No session finished a run.' +
+          '<br><span class="dim">' + t.empty + ' opened the game without starting one. ' +
+          'Show them with the button above.</span>'
+        : 'No sessions yet.' +
+          '<br><span class="dim">The game pings every few minutes while it is open, ' +
+          'so a session appears as soon as somebody plays for that long.</span>') +
+      '</div>';
   }
 
-  // Playtime is the headline: it is what a playtest is measured in, and it is
-  // the number nothing else in this service could produce.
-  const total = sessions.reduce((n, s) => n + (Number(s.seconds) || 0), 0);
-  const totalPlayed = sessions.reduce((n, s) => n + (Number(s.played) || 0), 0);
-  const lengths = sessions.map((s) => Number(s.seconds) || 0).sort((a, b) => a - b);
-  const mid = Math.floor(lengths.length / 2);
-  const med = lengths.length % 2 ? lengths[mid] : Math.round((lengths[mid - 1] + lengths[mid]) / 2);
-  // A session still checking in has not ended, so it is not evidence either
-  // way about how sessions end. Counting it as "closed normally" is what makes
-  // a crash rate drift down every time somebody leaves the game open.
-  const live = sessions.filter((s) => s.live).length;
-  const done = sessions.filter((s) => !s.live);
-  const crashed = done.filter((s) => s.ended_in_crash).length;
+  const total = Number(t.seconds) || 0;
+  const totalPlayed = Number(t.played) || 0;
+  const live = Number(t.live) || 0;
+  const ended = Number(t.ended) || 0;
+  const crashed = Number(t.crashed) || 0;
 
   const head = '<div class="blocks"><div class="block"><h4>Sessions</h4>' +
-      '<dl class="kv"><dt>played</dt><dd>' + sessions.length + '</dd>' +
-      '<dt>median length</dt><dd>' + esc(dur(med)) + '</dd></dl></div>' +
+      '<dl class="kv"><dt>played</dt><dd>' + (Number(t.sessions) || sessions.length) + '</dd>' +
+      '<dt>median length</dt><dd>' + esc(dur(t.median)) + '</dd>' +
+      (t.empty && !state.empty
+        ? '<dt>no runs</dt><dd class="dim">' + t.empty + ' hidden</dd>' : '') +
+      '</dl></div>' +
     // Two totals, because they answer different questions: how long was the
     // playtest, and how much game was actually played in it. The share tells
     // you how much of a session the shell is eating.
@@ -1296,11 +1323,14 @@ async function viewSessionList() {
       '<dt>in menus</dt><dd>' + esc(dur(Math.max(0, total - totalPlayed))) +
         (total ? ' <span class="dim">' + Math.round(((total - totalPlayed) / total) * 100) + '%</span>' : '') +
         '</dd></dl></div>' +
+    // A session still checking in has not ended, so it is not evidence either
+    // way about how sessions end. Counting it as "closed normally" is what
+    // makes a crash rate drift down every time somebody leaves the game open.
     '<div class="block"><h4>How they ended</h4>' +
-      '<dl class="kv"><dt>closed normally</dt><dd>' + (done.length - crashed) + '</dd>' +
+      '<dl class="kv"><dt>closed normally</dt><dd>' + Math.max(0, ended - crashed) + '</dd>' +
       '<dt class="crashy">ended in a crash</dt><dd class="crashy">' + crashed + '</dd>' +
       '<dt>crash rate</dt><dd>' +
-        (done.length ? Math.round((crashed / done.length) * 100) : 0) + '%</dd>' +
+        (ended ? Math.round((crashed / ended) * 100) : 0) + '%</dd>' +
       (live ? '<dt class="outcome-live">still open</dt><dd class="outcome-live">' + live +
               '</dd>' : '') + '</dl></div>' +
     '</div>';
@@ -1309,34 +1339,53 @@ async function viewSessionList() {
     '<th>Last seen</th><th>Session</th><th>App open</th><th>In game</th><th>Mode</th>' +
     '<th>Runs</th><th>Faults</th><th>Ended</th>' +
     '</tr></thead><tbody>' +
-    sessions.map((s) =>
-      '<tr data-href="' + esc(to({ view: "runs", session: s.session })) + '">' +
-      '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
-      '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) +
-        (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</a></td>' +
-      // A dash for absent, a duration for measured, the same way "in game"
-      // already reads. A session whose reports never carried a length is not a
-      // session that lasted no time, and "0s" says the second thing.
-      '<td class="num' + (s.seconds ? '' : ' dim') + '">' + esc(s.seconds ? dur(s.seconds) : "-") + '</td>' +
-      '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
-      '<td class="dim">' + esc(s.modes || "-") + '</td>' +
-      '<td>' + tally(s) + '</td>' +
-      '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
-      // Three states, not two. A session that is still checking in has not
-      // ended at all, and drawing it as "closed" or "crashed" is the portal
-      // reporting an outcome that has not happened.
-      '<td>' + (s.live
-        ? '<span class="outcome-live">live</span>' +
-          '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
-        : s.ended_in_crash
-          ? '<span class="outcome-crashed">crashed</span>'
-          : '<span class="dim">closed</span>') + '</td>' +
-      '</tr>').join("") + '</tbody></table>';
+    sessionRows(sessions) + '</tbody></table>';
 
-  return head + table;
+  return chips + head + table + moreBar("sessions", body.next);
 }
 
-// LEVELS TWO AND THREE: one session, its modes, and the runs inside them.
+// The runless sessions, as a filter. Same idiom as the sector chips and the
+// mode chips: a filter is a query rather than a place, so a link to it opens on
+// the same screenful somebody was looking at.
+//
+// Only drawn when there is a choice to make. With nothing hidden the button
+// would toggle between two identical lists.
+function emptyChips(t) {
+  if (!t || !t.empty) return "";
+  const chip = (label, on, empty) =>
+    '<a class="btn mode' + (on ? " on" : "") + '" href="' +
+    esc(to({ view: "runs", empty })) + '">' + esc(label) + '</a>';
+  return '<p class="dim">Sessions: ' +
+    chip("with runs", !state.empty, false) + " " +
+    chip("all (" + t.empty + " with none)", !!state.empty, true) + '</p>';
+}
+
+function sessionRows(sessions) {
+  return sessions.map((s) =>
+    '<tr data-href="' + esc(to({ view: "runs", session: s.session })) + '">' +
+    '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
+    '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) +
+      (s.player ? '<br><span class="dim">player ' + esc(s.player) + '</span>' : '') + '</a></td>' +
+    // A dash for absent, a duration for measured, the same way "in game"
+    // already reads. A session whose reports never carried a length is not a
+    // session that lasted no time, and "0s" says the second thing.
+    '<td class="num' + (s.seconds ? '' : ' dim') + '">' + esc(s.seconds ? dur(s.seconds) : "-") + '</td>' +
+    '<td class="num' + (s.played ? '' : ' dim') + '">' + esc(s.played ? dur(s.played) : "-") + '</td>' +
+    '<td class="dim">' + esc(s.modes || "-") + '</td>' +
+    '<td>' + tally(s) + '</td>' +
+    '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
+    // Three states, not two. A session that is still checking in has not
+    // ended at all, and drawing it as "closed" or "crashed" is the portal
+    // reporting an outcome that has not happened.
+    '<td>' + (s.live
+      ? '<span class="outcome-live">live</span>' +
+        '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
+      : s.ended_in_crash
+        ? '<span class="outcome-crashed">crashed</span>'
+        : '<span class="dim">closed</span>') + '</td>' +
+    '</tr>').join("");
+}
+
 async function viewOneSession() {
   const q = new URLSearchParams({ session: state.session });
   // The game, so the service can look up where THIS game keeps the order its
