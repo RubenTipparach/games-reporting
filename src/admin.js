@@ -253,6 +253,10 @@ pre {
 .ba-cell span:first-child { color: var(--dim); }
 .ba-same { color: var(--dim); }
 .ba-arrow { color: var(--dim); padding: 0 2px; }
+/* A tab row: the same chips as a filter, set apart because these are the
+   first question asked of a page rather than a narrowing of it. */
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px;
+        padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; }
 .legend span { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -368,6 +372,11 @@ function href(s) {
   const query = new URLSearchParams();
   if (s.game && !registered(s.game)) query.set("game", s.game);
   if (s.view === "upgrades" && s.sector) query.set("sector", s.sector);
+  // The mode filter, on the two views that have one. Not inside a session,
+  // where it is already a path segment and would otherwise be written twice.
+  if (s.mode && (s.view === "upgrades" || (s.view === "runs" && !s.session))) {
+    query.set("mode", s.mode);
+  }
   // Only on the session LIST. Inside one session there is nothing to hide, and
   // a flag that rides along into a drill-down is a flag somebody cannot drop.
   if (s.view === "runs" && !s.session && s.menus) query.set("menus", "1");
@@ -413,6 +422,10 @@ function readUrl() {
     next.game = parts[0];
     parts = parts.slice(1);
   }
+  // On the session LIST and the upgrade tally the mode is a filter, so it is
+  // a query. Inside one session it is a path segment, read below. Same piece
+  // of state either way: a mode is a mode.
+  next.mode = params.get("mode") || "";
   if (parts[0] === "reports") {
     next.view = "reports";
     if (parts[1]) next.report = parts[1];
@@ -421,7 +434,10 @@ function readUrl() {
     next.session = parts[1] || "";
     // A mode with no session to hang it on is not a view; it would render the
     // whole session list under a filter nothing shows.
-    next.mode = next.session ? (parts[2] || "") : "";
+    // A mode with no session to hang it on is not a PATH; it is still the
+    // list's filter, read off the query above. Clearing it here is what made
+    // the tab row draw and do nothing.
+    next.mode = next.session ? (parts[2] || "") : next.mode;
   } else if (parts[0] === "upgrades") {
     next.view = "upgrades";
   } else if (parts[0] === "issues" && parts[1]) {
@@ -601,6 +617,7 @@ function listQuery(kind) {
   // that walks a different list than the one on screen skips rows and repeats
   // others, and does it silently.
   if (kind === "sessions" && state.menus) q.set("menus", "1");
+  if (kind === "sessions" && state.mode) q.set("mode", state.mode);
   return q;
 }
 
@@ -1110,6 +1127,7 @@ async function viewUpgrades() {
   const q = new URLSearchParams();
   if (state.game) q.set("game", state.game);
   if (state.sector) q.set("sector", state.sector);
+  if (state.mode) q.set("mode", state.mode);
   const body = await api("/v1/upgrades?" + q.toString());
 
   if (!body.upgrades) {
@@ -1118,7 +1136,7 @@ async function viewUpgrades() {
       'and this page draws itself.</span></div>';
   }
   if (!body.runs) {
-    return sectorChips(body.sectors) +
+    return modeTabs(body.modes, "upgrades") + sectorChips(body.sectors) +
       '<div class="empty">No finished run has carried a build yet.' +
       '<br><span class="dim">The tally is over run summaries, so it fills in as runs end.</span></div>';
   }
@@ -1166,9 +1184,10 @@ async function viewUpgrades() {
       '</p></div>'
     : "";
 
-  return sectorChips(body.sectors) +
+  return modeTabs(body.modes, "upgrades") + sectorChips(body.sectors) +
     '<div class="card"><h2>' + esc(body.upgrades.title || "Upgrades") +
-      ' <span class="dim">across ' + body.runs + ' run' + (body.runs === 1 ? "" : "s") +
+      ' <span class="dim">across ' + body.runs + ' ' +
+      (state.mode ? esc(state.mode) + ' ' : '') + 'run' + (body.runs === 1 ? "" : "s") +
       (state.sector ? ' in ' + esc(state.sector) : '') + '</span></h2>' +
     upgradeLegend() +
     '<div class="up-list' + (named ? " up-art" : "") + '">' + rows + '</div>' +
@@ -1296,7 +1315,7 @@ async function viewSessionList() {
   // crash rate is the crash rate however far down somebody has loaded. Working
   // it out from the page was fine while one page was all there was.
   const t = body.totals || {};
-  const chips = emptyChips(t);
+  const chips = modeTabs(t.modes, "runs") + emptyChips(t);
 
   if (!sessions.length) {
     // Two different nothings. "None with runs" and "none at all" send somebody
@@ -1333,7 +1352,10 @@ async function viewSessionList() {
     // Two totals, because they answer different questions: how long was the
     // playtest, and how much game was actually played in it. The share tells
     // you how much of a session the shell is eating.
-    '<div class="block"><h4>Time</h4>' +
+    '<div class="block"><h4>Time' +
+      // The game reports one clock per session, not one per mode, so a mode
+      // tab cannot narrow these and does not pretend to.
+      (state.mode ? ' <span class="dim">whole session</span>' : '') + '</h4>' +
       '<dl class="kv"><dt>app open</dt><dd>' + esc(dur(total)) + '</dd>' +
       '<dt>in game</dt><dd>' + esc(dur(totalPlayed)) + '</dd>' +
       '<dt>in menus</dt><dd>' + esc(dur(Math.max(0, total - totalPlayed))) +
@@ -1358,6 +1380,29 @@ async function viewSessionList() {
     sessionRows(sessions) + '</tbody></table>';
 
   return chips + head + table + moreBar("sessions", body.next);
+}
+
+// THE MODES A GAME REPORTS, as tabs.
+//
+// Built from what came back rather than from a list of any game's words: a
+// game that calls them something else gets its own tabs, and a game with one
+// mode gets none, because a tab row with one tab is a label.
+//
+// "All" first and always, because the modes do not partition the sessions: a
+// session can play both, and 29 of the 500 on the live service do. Each of
+// those belongs under both tabs, and the sum of the tabs is therefore more
+// than the whole. Saying that out loud beats leaving somebody to add them up.
+function modeTabs(modes, view) {
+  if (!modes || modes.length < 2) return "";
+  const tab = (label, mode, on, n) =>
+    '<a class="btn mode' + (on ? " on" : "") + '" href="' +
+    esc(to(view === "upgrades" ? { view: "upgrades", mode } : { view: "runs", mode })) +
+    '">' + esc(label) +
+    (n === undefined ? "" : ' <span class="dim">' + n + '</span>') + '</a>';
+  return '<p class="tabs">' +
+    tab("All", "", !state.mode) + " " +
+    modes.map((m) => tab(m.mode, m.mode, state.mode === m.mode, m.sessions)).join(" ") +
+    '</p>';
 }
 
 // The runless sessions, as a filter. Same idiom as the sector chips and the

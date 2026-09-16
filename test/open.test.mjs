@@ -721,7 +721,7 @@ function router(pathname, search = "") {
       " effectAt, upgradeName, upgradeArt, upgradeTip," +
       " picksOf, buildOrder, pickTip, runPlace," +
       " statsCard, statPair, statPlot, statRows, statChange, statValue," +
-      " listQuery, sessionRows, sessionAbout, faultCard, reportRows };",
+      " listQuery, sessionRows, sessionAbout, faultCard, reportRows, modeTabs };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -1794,4 +1794,171 @@ test("every report says which session it came from, and links into it", () => {
     version: "dev", session: "", platform: "Linux", player: "",
   }]);
   assert.ok(!/sessions\//.test(none));
+});
+
+// ---------------------------------------------------------------------------
+// Campaign and survival, each on its own tab.
+//
+// The tabs come from the modes the DATA has, never from a list of any game's
+// words: THE RULE covers vocabulary as much as it covers ids, and "campaign"
+// and "survival" are Mining Mike's words.
+
+const MODES = "mode-tabs";
+
+let seededModes = null;
+function seedModes() {
+  if (!seededModes) {
+    seededModes = (async () => {
+      const post = (b) => fetch(`${base}/v1/reports`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ game: MODES, version: "dev", ...b }),
+      });
+      const play = async (session, mode, runs) => {
+        await post({ kind: "session", message: "open", session,
+          context: { session_sec: 900, played_sec: 600, mode, run: session + "-r1" } });
+        for (let i = 0; i < runs; i++) {
+          await post({ kind: "run", message: mode + " run", session,
+            context: { mode, outcome: "failed", run_seconds: 100, session_sec: 900, played_sec: 600 } });
+        }
+      };
+      // Three campaign, two survival, and ONE that played both. Written down
+      // rather than sampled, because the counts below are the whole point.
+      await play("camp-a", "campaign", 2);
+      await play("camp-b", "campaign", 1);
+      await play("camp-c", "campaign", 3);
+      await play("surv-a", "survival", 1);
+      await play("surv-b", "survival", 2);
+      await play("both-a", "campaign", 1);
+      await play("both-a", "survival", 4);
+    })();
+  }
+  return seededModes;
+}
+
+test("a mode tab lists the sessions that played it", async () => {
+  await seedModes();
+  const all = await (await fetch(`${base}/v1/sessions?game=${MODES}`)).json();
+  assert.equal(all.sessions.length, 6);
+
+  const camp = await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=campaign`)).json();
+  assert.deepEqual(camp.sessions.map((s) => s.session).sort(), ["both-a", "camp-a", "camp-b", "camp-c"]);
+
+  const surv = await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=survival`)).json();
+  assert.deepEqual(surv.sessions.map((s) => s.session).sort(), ["both-a", "surv-a", "surv-b"]);
+
+  // The modes do NOT partition the sessions. 4 + 3 is 7 against 6, because
+  // both-a played both and belongs under each. The tabs say so by never
+  // claiming to add up to the total.
+  assert.equal(camp.sessions.length + surv.sessions.length, 7);
+  assert.equal(all.sessions.length, 6);
+});
+
+test("a session that played both is counted for the tab it is under", async () => {
+  await seedModes();
+  const one = (body) => body.sessions.find((s) => s.session === "both-a");
+
+  const all = one(await (await fetch(`${base}/v1/sessions?game=${MODES}`)).json());
+  assert.equal(all.runs, 5, "one campaign run and four survival ones");
+
+  const camp = one(await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=campaign`)).json());
+  assert.equal(camp.runs, 1, "under campaign it is the campaign run and nothing else");
+  const surv = one(await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=survival`)).json());
+  assert.equal(surv.runs, 4);
+  // A tab labelled survival showing a session's campaign runs beside its
+  // survival ones is a tab that means nothing.
+  assert.equal(camp.runs + surv.runs, all.runs);
+
+  // The clocks are NOT narrowed, and are not pretended to be: the game reports
+  // one session_sec for the whole session, not one per mode.
+  assert.equal(camp.seconds, all.seconds);
+  assert.equal(surv.seconds, all.seconds);
+});
+
+test("the tabs are built from the data, and do not move when one is clicked", async () => {
+  await seedModes();
+  const shape = (b) => b.totals.modes.map((m) => m.mode + ":" + m.sessions).join(" ");
+  const all = await (await fetch(`${base}/v1/sessions?game=${MODES}`)).json();
+  assert.equal(shape(all), "campaign:4 survival:3");
+
+  // Tabs that disappear when you click them are not tabs.
+  const camp = await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=campaign`)).json();
+  assert.equal(shape(camp), shape(all));
+  const surv = await (await fetch(`${base}/v1/sessions?game=${MODES}&mode=survival`)).json();
+  assert.equal(shape(surv), shape(all));
+});
+
+test("the upgrade tally splits by mode, where the split is exact", async () => {
+  await seedModes();
+  // A registered game, because the tally reads the upgrade path off its entry.
+  // Two survival runs carrying a build, against however many campaign ones the
+  // rest of this file has posted.
+  const post = (mode, armor) => fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike", version: "dev", kind: "run", message: mode + " run",
+      session: "tally-" + mode,
+      context: { mode, outcome: "failed", run_seconds: 90,
+                 mech: { upgrades: { armor, dodge: 0 } } },
+    }),
+  });
+  await post("survival", 3);
+  await post("survival", 5);
+  // And one campaign run carrying a build, so "every run" is more than the
+  // survival ones. Nothing else in this file posts a mining-mike run with an
+  // upgrade map, so without this the two counts are the same number and the
+  // assertion below passes whether or not the filter does anything.
+  await post("campaign", 1);
+
+  const all = await (await fetch(`${base}/v1/upgrades?game=mining-mike`)).json();
+  assert.ok(all.modes, "the tally is handed the modes to draw tabs from");
+
+  // One run has ONE mode, so unlike the session list this is a real partition.
+  const surv = await (await fetch(`${base}/v1/upgrades?game=mining-mike&mode=survival`)).json();
+  assert.equal(surv.runs, 2, "exactly the survival runs that carried a build");
+  assert.ok(surv.runs < all.runs, "and strictly fewer than every run");
+
+  // A survival build and a campaign build are different builds, taken against
+  // different lengths and different failure conditions, so the levels behind
+  // one row are that mode's levels.
+  const armor = surv.taken.find((u) => u.upgrade === "armor");
+  assert.ok(armor, "armor was taken in both survival runs");
+  assert.equal(armor.runs, 2);
+  assert.deepEqual([...armor.levels].sort((a, b) => a - b), [3, 5]);
+});
+
+test("the mode is in the address on a list, and a path segment inside a session", () => {
+  const surv = router("/mining-mike/sessions", "?mode=survival");
+  assert.equal(surv.state.mode, "survival");
+  assert.equal(surv.href(surv.state), "/mining-mike/sessions?mode=survival");
+  assert.equal(surv.listQuery("sessions").get("mode"), "survival",
+    "and every page after the first is filtered the same way");
+
+  const tally = router("/mining-mike/upgrades", "?mode=campaign");
+  assert.equal(tally.state.mode, "campaign");
+  assert.equal(tally.href(tally.state), "/mining-mike/upgrades?mode=campaign");
+
+  // Inside one session the mode is already a path segment, and writing it
+  // twice is how an address stops round-tripping.
+  const one = router("/mining-mike/sessions/sess-a/survival");
+  assert.equal(one.state.mode, "survival");
+  assert.equal(one.href(one.state), "/mining-mike/sessions/sess-a/survival");
+
+  const plain = router("/mining-mike/sessions");
+  assert.equal(plain.state.mode, "", "and no filter is no query");
+  assert.equal(plain.href(plain.state), "/mining-mike/sessions");
+});
+
+test("one mode is a label, not a tab row", () => {
+  const { modeTabs } = portal();
+  // A tab row with one tab is a label, and a game with one mode should not be
+  // asked to click between it and All.
+  assert.equal(modeTabs([{ mode: "campaign", sessions: 4 }], "runs"), "");
+  assert.equal(modeTabs([], "runs"), "");
+  assert.equal(modeTabs(undefined, "runs"), "");
+
+  const two = modeTabs([{ mode: "campaign", sessions: 4 }, { mode: "survival", sessions: 3 }], "runs");
+  assert.match(two, /All/);
+  assert.match(two, /campaign/);
+  assert.match(two, /survival/);
+  assert.match(two, /mode=survival/, "each one an address somebody can paste");
 });

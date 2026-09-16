@@ -181,6 +181,31 @@ The first version of this filter held back everything with no run summary, and
 that is the mistake to not make again: **"no runs" and "never played" are
 different facts**, and the gap between them is most of what a playtest is.
 
+## Modes are tabs, and the tabs come from the data
+
+Campaign and survival are Mining Mike's words, so **no list of them is written
+into the portal**. `sessionTotals()` returns the modes its reports actually
+carry, and the tab row is built from that: a game that calls them something
+else gets its own tabs, and a game with one mode gets none, because a tab row
+with one tab is a label.
+
+Two things about that split are worth keeping:
+
+- **The modes do not partition the SESSIONS.** A session can play both, and 29
+  of the 500 on the live service do. Each belongs under both tabs, so the tabs
+  add up to more than the total and must never be drawn as if they were a pie.
+  The run counts inside a session ARE narrowed to the tab, because a survival
+  tab showing a session's campaign runs means nothing.
+- **A clock cannot be narrowed.** The game reports one `session_sec` and one
+  `played_sec` for the whole session, not a pair per mode. Splitting a number
+  that was never split is inventing it, so the Time block says "whole session"
+  on a mode tab instead.
+
+The upgrade tally is the easy case: one run has one mode, so that split is
+exact. It is worth having on its own - a survival build and a campaign build
+are taken against different lengths and different failure conditions, and
+tallying them together produces a ranking that describes neither.
+
 ## A page with no runs still has to say something
 
 A session that finished nothing still has a machine, a build, two clocks and
@@ -215,9 +240,9 @@ somebody does with this service is paste a link at somebody else:
 ```
 /mining-mike/issues            /mining-mike/issues/<signature>
 /mining-mike/reports           /mining-mike/reports/<id>
-/mining-mike/sessions          ?menus=1 adds the ones that never got into a game
+/mining-mike/sessions          ?mode=survival narrows it, ?menus=1 widens it
 /mining-mike/sessions/<session>/<mode>
-/mining-mike/upgrades          ?sector=<name> narrows it
+/mining-mike/upgrades          ?sector=<name> and ?mode=<name> narrow it
 /issues                        the same pages across every game
 ```
 
