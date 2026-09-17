@@ -302,3 +302,17 @@ Three habits this suite learned the hard way:
 The portal's browser script is compiled and run by the suite
 (`router()` in `test/open.test.mjs`), so routing is tested rather than read. It
 is handed the registry the same way the page is.
+
+## A green PR is finished, so do not re-arm a check-in
+
+Once a pull request is open, CI is green and there is no conflict, **stop**.
+Do not schedule an hourly check-in on it and never re-arm one that fired. The
+loop this forbids spent four turns printing the same three facts, and the
+thing it was waiting for was a person deciding to merge.
+
+Nothing is lost by stopping. A failing check, a review, a conflict and a push
+all arrive as events that wake the session on their own, and each is handled
+when it lands. A timer adds nothing except a turn that says nothing changed.
+
+A poll is for a signal that has no event behind it, and it ends the moment
+that signal arrives.
