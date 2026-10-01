@@ -68,6 +68,12 @@ const COLUMNS = [
 // the table underneath it: the same six aggregates, written twice, drifting the
 // first time one of them is corrected. The callers differ only in what they
 // wrap around this.
+function sessionMode(mode, args) {
+  if (!mode) return "1";
+  args.mode = mode;
+  return "json_extract(context, '$.mode') = @mode";
+}
+
 function sessionFilter(game, args) {
   let filter = "WHERE session <> ''";
   if (game) {
@@ -77,7 +83,11 @@ function sessionFilter(game, args) {
   return filter;
 }
 
-function sessionRollup(filter, having) {
+// `inMode` is a SQL test, not a value: "1" when no mode is being asked about,
+// and a comparison against @mode when one is. Built as a fragment because it
+// has to appear inside half a dozen conditional aggregates, and a bound NULL
+// compared with = is never true.
+function sessionRollup(filter, having, inMode = "1") {
   return `
           SELECT session,
                  MAX(game)                   AS game,
@@ -117,10 +127,23 @@ function sessionRollup(filter, having) {
                  -- What they played. A session can hold both, so this is the
                  -- set rather than a single value.
                  GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
-                 SUM(CASE WHEN kind = 'run' THEN 1 ELSE 0 END) AS runs,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    THEN 1 ELSE 0 END) AS failed,
-                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      THEN 1 ELSE 0 END) AS quit,
+                 -- Counted for the MODE being asked about, when one is. A tab
+                 -- labelled survival showing a session's campaign runs beside
+                 -- its survival ones is a tab that means nothing.
+                 --
+                 -- The two clocks above are deliberately NOT narrowed: the game
+                 -- reports one session_sec and one played_sec for the whole
+                 -- session, not a pair per mode, and splitting a number that
+                 -- was never split would be inventing it. The page says so.
+                 SUM(CASE WHEN kind = 'run' AND ${inMode} THEN 1 ELSE 0 END) AS runs,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'succeeded' AND ${inMode} THEN 1 ELSE 0 END) AS succeeded,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'failed'    AND ${inMode} THEN 1 ELSE 0 END) AS failed,
+                 SUM(CASE WHEN json_extract(context, '$.outcome') = 'quit'      AND ${inMode} THEN 1 ELSE 0 END) AS quit,
+                 -- Whether this session played the mode at all, which is what a
+                 -- mode tab filters on. A session can hold both: 29 of the 500
+                 -- on the live service do, and each of them belongs under both
+                 -- tabs rather than being assigned to one.
+                 MAX(CASE WHEN ${inMode} THEN 1 ELSE 0 END) AS in_mode,
                  SUM(CASE WHEN kind IN ('crash','error') THEN 1 ELSE 0 END) AS faults,
                  -- STILL RUNNING, or over. A session cannot report its own end
                  -- - a clean quit is the process leaving and a crash is the
@@ -438,7 +461,7 @@ export function openDatabase(dataDir) {
     // here, so the same rows can be asked about at a chosen instant - which is
     // what makes liveness testable without waiting five minutes for it.
     sessions({
-      game, limit = 100, now = Date.now(), staleAfter = 600_000,
+      game, mode, limit = 100, now = Date.now(), staleAfter = 600_000,
       withEmpty = true, before, beforeId,
     } = {}) {
       const args = {
@@ -447,6 +470,7 @@ export function openDatabase(dataDir) {
         staleAfter,
       };
       const filter = sessionFilter(game, args);
+      const inMode = sessionMode(mode, args);
       // Both tests are HAVINGs and not WHEREs, for the same reason the issue
       // rollup's cursor is: `runs` and `last_seen` are aggregates, and neither
       // exists until the rows are grouped.
@@ -464,6 +488,8 @@ export function openDatabase(dataDir) {
       // which is the right way round: a store hands back what is in the table,
       // and which of it is worth a screenful is a decision about the product.
       if (!withEmpty) tests.push("(runs > 0 OR entered = 1)");
+      // A mode tab lists the sessions that PLAYED that mode.
+      if (mode) tests.push("in_mode = 1");
       if (before) {
         // `session` is the GROUP BY key and so is unique per row, which makes
         // (last_seen, session) a total order the same way (received_at, id) is
@@ -477,7 +503,7 @@ export function openDatabase(dataDir) {
       const having = tests.length ? "HAVING " + tests.join(" AND ") : "";
       return db
         .prepare(`
-          ${sessionRollup(filter, having)}
+          ${sessionRollup(filter, having, inMode)}
           ORDER BY last_seen DESC, session DESC
           LIMIT @limit
         `)
@@ -491,10 +517,15 @@ export function openDatabase(dataDir) {
     // out from the rows on screen was fine while one screenful was all there
     // was; with a cursor under the list it would mean a crash rate that moved
     // every time somebody pressed Load more.
-    sessionTotals({ game, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
+    sessionTotals({ game, mode, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
       const args = { now, staleAfter };
       const filter = sessionFilter(game, args);
-      const shown = sessionRollup(filter, withEmpty ? "" : "HAVING (runs > 0 OR entered = 1)");
+      const inMode = sessionMode(mode, args);
+      const tests = [];
+      if (!withEmpty) tests.push("(runs > 0 OR entered = 1)");
+      if (mode) tests.push("in_mode = 1");
+      const shown = sessionRollup(
+        filter, tests.length ? "HAVING " + tests.join(" AND ") : "", inMode);
       const totals = db.prepare(`
         SELECT COUNT(*)                          AS sessions,
                COALESCE(SUM(seconds), 0)         AS seconds,
@@ -514,7 +545,11 @@ export function openDatabase(dataDir) {
       // nothing is being hidden, because "none that stayed in the menu" and
       // "we are not filtering" are the same screen and different facts.
       const empty = db.prepare(`
-        SELECT COUNT(*) AS n FROM (${sessionRollup(filter, "HAVING runs = 0 AND entered = 0")})
+        SELECT COUNT(*) AS n FROM (${sessionRollup(
+          filter,
+          "HAVING runs = 0 AND entered = 0" + (mode ? " AND in_mode = 1" : ""),
+          inMode,
+        )})
       `).get(args).n;
       // The middle session, over the same set as the rest of these. The two
       // middles averaged on an even count, which is the definition the page
@@ -526,7 +561,26 @@ export function openDatabase(dataDir) {
           OFFSET (SELECT MAX(0, (COUNT(*) - 1) / 2) FROM (${shown}))
         )
       `).get(args).med;
-      return { ...totals, empty, median: Math.round(median) };
+      // THE MODES THERE ARE, so a tab row can be built from what the game
+      // reports rather than from a list of its words written into the portal.
+      // A game that calls them something else gets its own tabs; a game with
+      // one mode gets none, because a tab row with one tab is a label.
+      //
+      // Deliberately NOT narrowed by the mode being shown: tabs that disappear
+      // when you click them are not tabs. Its own args, because it reads none
+      // of the clocks the rollup binds.
+      const modeArgs = {};
+      const modes = db.prepare(`
+        SELECT mode, COUNT(*) AS sessions FROM (
+          SELECT DISTINCT session, json_extract(context, '$.mode') AS mode
+          FROM reports
+          ${sessionFilter(game, modeArgs)}
+        )
+        WHERE mode IS NOT NULL AND mode <> ''
+        GROUP BY mode
+        ORDER BY sessions DESC, mode
+      `).all(modeArgs);
+      return { ...totals, empty, median: Math.round(median), modes };
     },
 
     // WHAT PLAYERS BUILT, tallied across runs.
@@ -541,11 +595,18 @@ export function openDatabase(dataDir) {
     // it was taken at. Levels come back as a list rather than an average
     // because the median is the honest middle of a handful of runs and SQLite
     // has no median function; the caller takes it.
-    upgradeTally({ game, path, sector, depth }) {
+    upgradeTally({ game, path, sector, depth, mode }) {
       if (!game || !path) return { runs: 0, taken: [], never: [] };
       const json = "$." + path;
       const args = { game, json };
       let filter = "WHERE r.kind = 'run' AND r.game = @game";
+      // A survival build and a campaign build are different builds, taken
+      // against different lengths and different failure conditions. Tallying
+      // them together produces a ranking that describes neither.
+      if (mode) {
+        filter += " AND json_extract(r.context, '$.mode') = @mode";
+        args.mode = mode;
+      }
       if (sector) {
         filter += " AND json_extract(r.context, '$.sector_title') = @sector";
         args.sector = sector;

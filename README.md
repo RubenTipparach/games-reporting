@@ -326,6 +326,24 @@ page of fifty should be fifty rows somebody wants. Filtered after the fact it
 would be fifty rows taken off the service and however many of them happened to
 qualify, with the cursor paging a list nobody is looking at.
 
+### Campaign and survival, on their own tabs
+
+```
+/mining-mike/sessions?mode=survival    sessions that played survival
+/mining-mike/upgrades?mode=survival    what survival runs built
+```
+
+The tabs are built from the modes the reports carry, not from a list in the
+portal: another game's modes become that game's tabs without a line changing.
+
+On the session list a mode is **membership, not a partition** - a session can
+play both, so the tabs add up to more than the total. The run and outcome
+counts inside each row are narrowed to the tab; the two clocks are not, because
+the game reports one of each per session rather than one per mode, and the
+header says "whole session" when a tab is on.
+
+On the upgrade tally the split is exact, since a run has one mode.
+
 ### One session's reports
 
 `GET /v1/reports?session=<id>` is every report that session sent, and composes

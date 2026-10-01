@@ -440,12 +440,16 @@ function handleRequest(req, res, url) {
       path: upgradePath,
       sector: q.get("sector") || undefined,
       depth: q.get("depth") || undefined,
+      mode: q.get("mode") || undefined,
     });
     const entry = GAMES.find((g) => g.id === game);
     return send(res, 200, {
       game,
       upgrades: entry.upgrades,
       sectors: store.runPlaces({ game }),
+      // The modes this game reports, so the tally can be split by them without
+      // the portal holding a list of any game's words.
+      modes: store.sessionTotals({ game }).modes,
       ...tally,
     });
   }
@@ -481,6 +485,10 @@ function handleRequest(req, res, url) {
     const before = q.get("before") ? Number(q.get("before")) : undefined;
     const shared = {
       game: q.get("game") || undefined,
+      // Which mode's numbers these are. A session can hold both, so this is
+      // "sessions that played this mode" and the run counts inside them are
+      // narrowed to it.
+      mode: q.get("mode") || undefined,
       // Sessions that NEVER LEFT THE MENU are held back unless asked for.
       //
       // Not "sessions with no runs", which is what this held back first and
