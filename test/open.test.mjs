@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ process.env.RATE_BURST = "500";
 process.env.RATE_PER_MINUTE = "500";
 
 const { adminPage } = await import("../src/admin.js");
-const { registryForPage, upgradePathFor, checkUpgrades, checkStats, GAMES: REGISTRY } = await import("../src/games.js");
+const { registryForPage, upgradePathFor, checkUpgrades, checkStats, checkSources, GAMES: REGISTRY } = await import("../src/games.js");
 const { server, store } = await import("../src/server.js");
 const base = await new Promise((resolve) => {
   server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
@@ -721,7 +721,8 @@ function router(pathname, search = "") {
       " effectAt, upgradeName, upgradeArt, upgradeTip," +
       " picksOf, buildOrder, pickTip, runPlace," +
       " statsCard, statPair, statPlot, statRows, statChange, statValue," +
-      " listQuery, sessionRows, sessionAbout, faultCard, reportRows, modeTabs };",
+      " listQuery, sessionRows, sessionAbout, faultCard, reportRows, modeTabs," +
+      " sourceTabs, sessionHead, rowPairs };",
   );
   return load(
     doc, loc, { pushState() {} },
@@ -1961,4 +1962,298 @@ test("one mode is a label, not a tab row", () => {
   assert.match(two, /campaign/);
   assert.match(two, /survival/);
   assert.match(two, /mode=survival/, "each one an address somebody can paste");
+});
+
+// ---------------------------------------------------------------------------
+// Who was at the controls.
+//
+// Every report says so in `source`: absent or "player" is a person, anything
+// else is not. Mining Mike's autopilot plays a level with nobody at the
+// controls and reports exactly like a player does, plus that one field, so
+// without this a night of forty seeds is forty sessions in the playtest, forty
+// sets of outcomes in it, and a crash rate that describes the bot.
+
+const MIX = "source-mix";
+const T_MIX = 1_700_000_000_000;
+
+// Built by hand with the timestamps written down, because "ended in a crash"
+// is a strict ordering between two reports and two posts can share a
+// millisecond. Long past, so nothing here is still live by the route's clock.
+let seededMix = false;
+function seedMix() {
+  if (seededMix) return;
+  seededMix = true;
+  let n = 0;
+  const put = (session, kind, context, at) => store.insert({
+    id: `${MIX}-${++n}`, received_at: T_MIX + at, game: MIX, version: "dev", kind,
+    signature: "sig-" + kind, title: kind, message: kind, stack: "", log: "",
+    platform: "", gpu: "", engine: "", session, player: "",
+    context: JSON.stringify(context),
+  });
+  const clocks = { session_sec: 600, played_sec: 300 };
+  // A person on a build that sends the field, and one on a build from before
+  // it existed. Both are people.
+  put("human-new", "session", { ...clocks, source: "player", mode: "campaign", run: "r" }, 1);
+  put("human-new", "run", { ...clocks, source: "player", mode: "campaign", outcome: "succeeded" }, 2);
+  put("human-old", "session", { ...clocks, mode: "survival", run: "r" }, 3);
+  put("human-old", "run", { ...clocks, mode: "survival", outcome: "failed" }, 4);
+  // Two bot runs, one of which crashed: a marker crash is its last word.
+  put("bot-1", "session", { ...clocks, source: "autopilot", mode: "campaign", run: "r" }, 5);
+  put("bot-1", "run", { ...clocks, source: "autopilot", mode: "campaign", outcome: "failed" }, 6);
+  put("bot-1", "crash", { source: "autopilot", detected_by: "session marker" }, 7);
+  put("bot-2", "session", { ...clocks, source: "autopilot", mode: "campaign", run: "r" }, 8);
+  put("bot-2", "run", { ...clocks, source: "autopilot", mode: "campaign", outcome: "succeeded" }, 9);
+}
+
+const sessionsOf = async (query) => (await fetch(`${base}/v1/sessions?${query}`)).json();
+const names = (body) => body.sessions.map((s) => s.session).sort();
+
+test("the session list is people unless it is asked for something else", async () => {
+  seedMix();
+  const people = await sessionsOf(`game=${MIX}`);
+  assert.deepEqual(names(people), ["human-new", "human-old"],
+    "a build that sends no source at all is a person, which every one of them was");
+  assert.ok(people.sessions.every((s) => s.source === "player"), "and each row says so");
+
+  const bots = await sessionsOf(`game=${MIX}&source=autopilot`);
+  assert.deepEqual(names(bots), ["bot-1", "bot-2"]);
+  assert.ok(bots.sessions.every((s) => s.source === "autopilot"));
+
+  assert.deepEqual(names(await sessionsOf(`game=${MIX}&source=player`)), names(people),
+    "naming people is the same list as the default");
+  assert.equal((await sessionsOf(`game=${MIX}&source=all`)).sessions.length, 4,
+    "and all is both, for a caller that wants them mixed");
+});
+
+test("a bot's crash and outcomes stay out of the playtest's numbers", async () => {
+  seedMix();
+  const people = (await sessionsOf(`game=${MIX}`)).totals;
+  assert.equal(people.sessions, 2);
+  assert.equal(people.ended, 2);
+  assert.equal(people.crashed, 0, "the bot's crash is not a player's crash");
+
+  const bots = (await sessionsOf(`game=${MIX}&source=autopilot`)).totals;
+  assert.equal(bots.sessions, 2);
+  assert.equal(bots.crashed, 1, "and it is still counted, on the bot's own tab");
+  assert.equal(bots.seconds, 2 * 600, "with the bot's own clocks");
+});
+
+test("the source tabs come from the data, and do not move when one is clicked", async () => {
+  seedMix();
+  const shape = (b) => b.totals.sources.map((s) => s.source + ":" + s.sessions).join(" ");
+  const people = await sessionsOf(`game=${MIX}`);
+  assert.equal(shape(people), "player:2 autopilot:2", "people first, then the rest");
+  assert.equal(shape(await sessionsOf(`game=${MIX}&source=autopilot`)), shape(people));
+  assert.equal(shape(await sessionsOf(`game=${MIX}&mode=survival`)), shape(people));
+});
+
+test("the mode tabs under a source tab count that source", async () => {
+  seedMix();
+  const modes = (b) => b.totals.modes.map((m) => m.mode + ":" + m.sessions).join(" ");
+  assert.equal(modes(await sessionsOf(`game=${MIX}`)), "campaign:1 survival:1",
+    "the bots' two campaign sessions are not people's");
+  assert.equal(modes(await sessionsOf(`game=${MIX}&source=autopilot`)), "campaign:2");
+});
+
+test("the store hands back everything, and the route decides who a list is about", () => {
+  seedMix();
+  // The same split as the menus filter: the store reports what is in the
+  // table, and that a playtest's numbers are about people is the product's call.
+  const now = Date.now();
+  assert.equal(store.sessions({ game: MIX, now, staleAfter: 600_000 }).length, 4);
+  assert.equal(store.sessionTotals({ game: MIX, now, staleAfter: 600_000 }).sessions, 4);
+  assert.equal(store.sessions({ game: MIX, now, staleAfter: 600_000, source: "autopilot" }).length, 2);
+});
+
+// A real autopilot run, copied off the live service: a heartbeat, the run
+// summary and the session report carrying the bot's verdict, exactly as sent.
+const AUTOPILOT = JSON.parse(readFileSync(new URL("./fixtures/autopilot-run.json", import.meta.url), "utf8"));
+
+async function postAs(session, report) {
+  const res = await fetch(`${base}/v1/reports`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      game: "mining-mike", version: report.version, kind: report.kind, message: report.message,
+      platform: report.platform, engine: report.engine, session, context: report.context,
+    }),
+  });
+  assert.equal(res.status, 201);
+  return (await res.json()).id;
+}
+
+let seededBot = null;
+function seedBot() {
+  if (!seededBot) {
+    seededBot = (async () => {
+      await postAs("bot-egg", AUTOPILOT.heartbeat);
+      await postAs("bot-egg", AUTOPILOT.run);
+      const verdict = await postAs("bot-egg", AUTOPILOT.verdict);
+      // A run that hung or crashed before it could say how it went: one
+      // check-in, and nothing after it.
+      await postAs("bot-hung", AUTOPILOT.heartbeat);
+      return { verdict };
+    })();
+  }
+  return seededBot;
+}
+
+test("a bot's builds stay out of the upgrade tally, and are one source away", async () => {
+  const tally = async (q = "") => (await fetch(`${base}/v1/upgrades?game=mining-mike${q}`)).json();
+  const before = await tally();
+  await seedBot();
+  const after = await tally();
+  assert.equal(after.runs, before.runs, "a brain's choices are not a player's");
+  assert.deepEqual(after.taken, before.taken);
+
+  const bots = await tally("&source=autopilot");
+  assert.equal(bots.runs, 1, "the bot's one run, on its own");
+  const shotgun = bots.taken.find((u) => u.upgrade === "shotgun");
+  assert.ok(shotgun, "with the build it actually took");
+  assert.deepEqual(shotgun.levels, [4]);
+  assert.equal(shotgun.failed, 1);
+});
+
+test("a bot's row carries its own columns, read off the report its run ended on", async () => {
+  const { verdict } = await seedBot();
+  const body = await sessionsOf("game=mining-mike&source=autopilot");
+  const row = body.sessions.find((s) => s.session === "bot-egg");
+  assert.ok(row, "listed on its own tab");
+  assert.equal(row.source_report.id, verdict, "the report the run ENDED on, not its last check-in");
+  assert.equal(row.source_report.verdict, true);
+
+  const c = row.source_report.context;
+  assert.equal(c.autopilot_result.level.name, "Egg Chambers");
+  assert.equal(c.autopilot.seed, 2);
+  assert.equal(c.autopilot.brain, "egg_multibarrel");
+  assert.equal(c.autopilot_result.status, "lost");
+  assert.equal(c.autopilot_result.waves_cleared, 9);
+  assert.equal(c.autopilot_result.waves_total, 10);
+  assert.deepEqual(c.autopilot_result.objective.rows, ["13/22 egg clutches broken"]);
+  // The columns and nothing else. The report is kilobytes and a page of a
+  // hundred of them is most of a megabyte nobody draws.
+  assert.equal(c.mech, undefined);
+  assert.equal(c.autopilot_result.mech, undefined);
+  assert.ok(JSON.stringify(c).length < 400, "a few dozen bytes per row, not the whole context");
+
+  // People's rows on the default list carry no such thing, and the bot's rows
+  // are not on it at all.
+  const people = await sessionsOf("game=mining-mike&menus=1&limit=500");
+  assert.ok(!people.sessions.some((s) => s.session === "bot-egg" || s.session === "bot-hung"));
+  assert.ok(people.sessions.every((s) => s.source_report === undefined));
+});
+
+test("a bot run that never sent a verdict still says what it was told to play", async () => {
+  await seedBot();
+  const body = await sessionsOf("game=mining-mike&source=autopilot");
+  const hung = body.sessions.find((s) => s.session === "bot-hung");
+  assert.ok(hung);
+  assert.equal(hung.source_report.verdict, false, "and says it is not a verdict");
+  // The seed and the brain ride on every report it sends, so the run can be
+  // played again from the last check-in alone.
+  assert.equal(hung.source_report.context.autopilot.seed, 2);
+  assert.equal(hung.source_report.context.autopilot_result, undefined);
+});
+
+test("the source tab is in the address on the list, and nowhere else", () => {
+  const bots = router("/mining-mike/sessions", "?source=autopilot");
+  assert.equal(bots.state.source, "autopilot");
+  assert.equal(bots.href(bots.state), "/mining-mike/sessions?source=autopilot");
+  assert.equal(bots.listQuery("sessions").get("source"), "autopilot",
+    "and every page after the first is the same source");
+  assert.equal(bots.listQuery("reports").get("source"), null);
+
+  const people = router("/mining-mike/sessions");
+  assert.equal(people.state.source, "");
+  assert.equal(people.href(people.state), "/mining-mike/sessions", "people carry no query");
+
+  // A session is whoever played it, so the filter does not ride into one.
+  const one = router("/mining-mike/sessions/bot-egg", "?source=autopilot");
+  assert.equal(one.href(one.state), "/mining-mike/sessions/bot-egg");
+});
+
+test("a game with nobody but people gets no source tabs", () => {
+  const { sourceTabs } = portal();
+  assert.equal(sourceTabs([{ source: "player", sessions: 4 }]), "");
+  assert.equal(sourceTabs([]), "");
+  assert.equal(sourceTabs(undefined), "");
+
+  const two = sourceTabs([{ source: "player", sessions: 4 }, { source: "autopilot", sessions: 2 }]);
+  assert.match(two, /Players/);
+  assert.match(two, /Autopilot/, "the data's own word, capitalised");
+  assert.match(two, /source=autopilot/, "each one an address somebody can paste");
+
+  // A game whose only sessions are a bot's still needs a way to them: the
+  // default list is people, and it would be empty with no tab to click.
+  assert.match(sourceTabs([{ source: "autopilot", sessions: 2 }]), /source=autopilot/);
+});
+
+test("the autopilot tab draws the columns the game's entry names, off the wire", async () => {
+  await seedBot();
+  // The rows as the service hands them back, not a hand-written fixture.
+  const body = await sessionsOf("game=mining-mike&source=autopilot");
+  const { sessionRows, sessionHead } = router("/mining-mike/sessions", "?source=autopilot");
+  const head = sessionHead();
+  for (const col of ["level", "seed", "brain", "result", "waves", "objective"]) {
+    assert.match(head, new RegExp(">" + col + "<"), col + " is a column");
+  }
+  const egg = sessionRows(body.sessions.filter((s) => s.session === "bot-egg"));
+  assert.match(egg, />Egg Chambers</);
+  assert.match(egg, />2</, "the seed");
+  assert.match(egg, />egg_multibarrel</);
+  assert.match(egg, />lost</);
+  assert.match(egg, />9 \/ 10</, "waves as a count out of the whole");
+  assert.match(egg, />13\/22 egg clutches broken</);
+  assert.ok(!/no verdict/.test(egg));
+
+  // People's tab keeps people's columns.
+  const { sessionHead: playerHead } = router("/mining-mike/sessions");
+  assert.match(playerHead(), />Mode</);
+  assert.ok(!/>brain</.test(playerHead()));
+});
+
+test("a run that ended without a verdict says so on its row", async () => {
+  await seedBot();
+  const body = await sessionsOf("game=mining-mike&source=autopilot");
+  const { sessionRows } = router("/mining-mike/sessions", "?source=autopilot");
+  const hung = body.sessions.find((s) => s.session === "bot-hung");
+  // Over, rather than still running: a live one has simply not finished yet.
+  assert.match(sessionRows([{ ...hung, live: 0 }]), /no verdict/);
+  assert.ok(!/no verdict/.test(sessionRows([{ ...hung, live: 1 }])));
+  assert.match(sessionRows([{ ...hung, live: 0 }]), />-</, "and its result is a dash, not a guess");
+});
+
+test("a bot's session page says what it was told to play and links its verdict", async () => {
+  const { verdict } = await seedBot();
+  const all = await sessionsOf("game=mining-mike&source=all&menus=1&limit=500");
+  const row = all.sessions.find((s) => s.session === "bot-egg");
+  assert.ok(row, "source=all finds a bot session, which is what the drill-down asks for");
+  const { sessionAbout } = portal();
+  const about = sessionAbout(row, [], []);
+  assert.match(about, /<h4>Autopilot<\/h4>/);
+  assert.match(about, /egg_multibarrel/);
+  assert.match(about, /Egg Chambers/);
+  assert.match(about, new RegExp("reports/" + verdict), "and links the report the verdict is in");
+});
+
+test("the source grammar reads lists and counts out of a whole", () => {
+  const { rowPairs } = portal();
+  const ctx = { a: { n: 9, of: 10, list: ["x", "y"], none: [] } };
+  assert.deepEqual(rowPairs(ctx, ["waves", "a.n", { of: "a.of" }]), [["waves", "9 / 10"]]);
+  assert.deepEqual(rowPairs(ctx, ["waves", "a.n", { of: "a.missing" }]), [["waves", 9]],
+    "a run that never learned the whole still knows its count");
+  assert.deepEqual(rowPairs(ctx, ["rows", "a.list"]), [["rows", "x, y"]]);
+  assert.deepEqual(rowPairs(ctx, ["rows", "a.none"]), [], "an empty list is no row");
+});
+
+test("a source's entry is checked, and the check is checked", () => {
+  const ok = { verdict: "result", columns: [["seed", "about.seed"]] };
+  const bad = (sources) => () => checkSources({ id: "x", sources });
+  assert.doesNotThrow(bad({ autopilot: ok }));
+  assert.doesNotThrow(() => checkSources({ id: "x" }), "a game with no bots is fine");
+  assert.throws(bad({ player: ok }), /is the person/);
+  assert.throws(bad({ autopilot: { ...ok, verdict: "" } }), /no verdict/);
+  assert.throws(bad({ autopilot: { ...ok, verdict: "a; DROP TABLE reports" } }), /not a context path/);
+  assert.throws(bad({ autopilot: { ...ok, columns: [] } }), /no columns/);
+  assert.throws(bad({ autopilot: { ...ok, columns: [["seed"]] } }), /not \[label, path\]/);
+  assert.throws(bad({ autopilot: { ...ok, columns: [["w", "a.b", { of: "x y" }]] } }), /"of" a path/);
 });

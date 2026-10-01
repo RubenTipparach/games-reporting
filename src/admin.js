@@ -335,7 +335,37 @@ const state = {
   sector: "",
   // Whether the session list is showing the ones that never left the menu.
   menus: false,
+  // Who the session list is about. Empty is people, which is the default on
+  // the service too; anything else is a source the reports carry, such as a
+  // bot that plays the game with nobody at the controls.
+  source: "",
 };
+
+// The service's word for a person at the controls. Every other source is not
+// one, and has a tab of its own rather than a share of the playtest's numbers.
+const PLAYER_SOURCE = "player";
+
+// Whether the list on screen is a non-player source's, which is the one case
+// that draws that source's own columns.
+function onSourceTab() {
+  return !!state.source && state.source !== PLAYER_SOURCE && state.source !== "all";
+}
+
+// What a game's entry says about one of its non-player sources, or null. Null
+// still gets a tab and the generic columns; it is a source nobody has written
+// columns for yet.
+function sourceSpec(gameId, source) {
+  const e = entryFor(gameId);
+  if (!e || !e.sources || !Object.prototype.hasOwnProperty.call(e.sources, source)) return null;
+  return e.sources[source];
+}
+
+// A source's name as a tab says it. The data's own word, capitalised, so a
+// game whose bot calls itself something else gets that word on its tab.
+function sourceLabel(source) {
+  if (!source || source === PLAYER_SOURCE) return "Players";
+  return String(source).charAt(0).toUpperCase() + String(source).slice(1);
+}
 
 // Whether a game name is one the service carries an entry for. A registered
 // game gets a path of its own; anything else - a CI fixture, a game nobody has
@@ -380,6 +410,9 @@ function href(s) {
   // Only on the session LIST. Inside one session there is nothing to hide, and
   // a flag that rides along into a drill-down is a flag somebody cannot drop.
   if (s.view === "runs" && !s.session && s.menus) query.set("menus", "1");
+  // The source tab, on the same terms: a filter on the list, so a query, and
+  // gone inside one session, which is whoever played it.
+  if (s.view === "runs" && !s.session && s.source) query.set("source", s.source);
   const tail = query.toString() ? "?" + query.toString() : "";
   if (s.game && registered(s.game)) return "/" + seg(s.game) + path + tail;
   return path + tail;
@@ -392,7 +425,7 @@ function to(patch) {
   return href(Object.assign(
     {
       view: "signatures", game: state.game, signature: "", report: null,
-      session: "", mode: "", sector: "", menus: false,
+      session: "", mode: "", sector: "", menus: false, source: "",
     },
     patch));
 }
@@ -414,6 +447,8 @@ function readUrl() {
     // Sessions that never got into a game are off the list unless the address
     // says otherwise. A filter and not a place, so it is a query.
     menus: params.get("menus") === "1",
+    // People unless the address names another source.
+    source: params.get("source") || "",
   };
   // A leading segment naming a registered game is the game, and the rest of
   // the path is read exactly as it would be without it. One shift, and every
@@ -483,7 +518,10 @@ function pageTitle() {
   const short = (v) => String(v).slice(0, 12);
   if (state.report) return "Report " + short(state.report);
   if (state.view === "upgrades") return "Upgrades";
-  if (state.view === "runs") return state.session ? "Session " + short(state.session) : "Sessions";
+  if (state.view === "runs") {
+    if (state.session) return "Session " + short(state.session);
+    return onSourceTab() ? sourceLabel(state.source) + " sessions" : "Sessions";
+  }
   if (state.signature) return "Issue " + short(state.signature);
   if (state.view === "reports") return "Reports";
   return "Issues";
@@ -618,6 +656,7 @@ function listQuery(kind) {
   // others, and does it silently.
   if (kind === "sessions" && state.menus) q.set("menus", "1");
   if (kind === "sessions" && state.mode) q.set("mode", state.mode);
+  if (kind === "sessions" && state.source) q.set("source", state.source);
   return q;
 }
 
@@ -1315,7 +1354,7 @@ async function viewSessionList() {
   // crash rate is the crash rate however far down somebody has loaded. Working
   // it out from the page was fine while one page was all there was.
   const t = body.totals || {};
-  const chips = modeTabs(t.modes, "runs") + emptyChips(t);
+  const chips = sourceTabs(t.sources) + modeTabs(t.modes, "runs") + emptyChips(t);
 
   if (!sessions.length) {
     // Two different nothings. "None with runs" and "none at all" send somebody
@@ -1373,13 +1412,62 @@ async function viewSessionList() {
               '</dd>' : '') + '</dl></div>' +
     '</div>';
 
-  const table = '<table><thead><tr>' +
-    '<th>Last seen</th><th>Session</th><th>App open</th><th>In game</th><th>Mode</th>' +
-    '<th>Runs</th><th>Faults</th><th>Ended</th>' +
-    '</tr></thead><tbody>' +
+  const table = '<table><thead><tr>' + sessionHead() + '</tr></thead><tbody>' +
     sessionRows(sessions) + '</tbody></table>';
 
   return chips + head + table + moreBar("sessions", body.next);
+}
+
+// The columns of the list on screen. A non-player source this game describes
+// swaps the mode, the in-game clock and the run tally for its own columns:
+// a bot's mode is whatever it was told, its clock is the run, and how its run
+// went is its verdict, which says more than "1 failed" does.
+function listSpec() {
+  return onSourceTab() ? sourceSpec(state.game, state.source) : null;
+}
+
+function sessionHead() {
+  const spec = listSpec();
+  if (spec) {
+    return '<th>Last seen</th><th>Session</th>' +
+      spec.columns.map((c) => '<th>' + esc(c[0]) + '</th>').join("") +
+      '<th>App open</th><th>Faults</th><th>Ended</th>';
+  }
+  return '<th>Last seen</th><th>Session</th><th>App open</th><th>In game</th><th>Mode</th>' +
+    '<th>Runs</th><th>Faults</th><th>Ended</th>';
+}
+
+// WHO PLAYED, as tabs: people, then every other source the reports carry.
+//
+// The same rule as the modes: built from the data, so a game whose bot calls
+// itself something else gets that word, and a game with nobody but people gets
+// no tab row. Unlike the modes this one IS a partition, since a session has one
+// source, so the tabs add up to the whole.
+//
+// Drawn whenever a non-player source exists, even with no people yet: the
+// people's tab is the default list, and a bot's sessions behind no tab would be
+// held off the list with no way to them.
+function sourceTabs(sources) {
+  if (!sources || !sources.some((s) => s.source !== PLAYER_SOURCE)) return "";
+  const players = sources.find((s) => s.source === PLAYER_SOURCE);
+  const tab = (label, source, on, n) =>
+    '<a class="btn mode' + (on ? " on" : "") + '" href="' +
+    esc(to({ view: "runs", source, menus: state.menus })) + '">' + esc(label) +
+    ' <span class="dim">' + (n || 0) + '</span></a>';
+  return '<p class="tabs">' +
+    tab(sourceLabel(PLAYER_SOURCE), "", !onSourceTab(), players && players.sessions) + " " +
+    sources.filter((s) => s.source !== PLAYER_SOURCE)
+      .map((s) => tab(sourceLabel(s.source), s.source, state.source === s.source, s.sessions))
+      .join(" ") +
+    '</p>';
+}
+
+// One column of a non-player source, off the report its run ended on. The same
+// grammar as a context block, so the page reads it the way it reads every other
+// thing a game asked to be put on screen.
+function sourceCell(ctx, column) {
+  const pairs = ctx ? rowPairs(ctx, column) : [];
+  return pairs.length ? String(pairs[0][1]) : "-";
 }
 
 // THE MODES A GAME REPORTS, as tabs.
@@ -1394,9 +1482,11 @@ async function viewSessionList() {
 // than the whole. Saying that out loud beats leaving somebody to add them up.
 function modeTabs(modes, view) {
   if (!modes || modes.length < 2) return "";
+  // The mode tabs sit under the source tab, so clicking one keeps it.
   const tab = (label, mode, on, n) =>
     '<a class="btn mode' + (on ? " on" : "") + '" href="' +
-    esc(to(view === "upgrades" ? { view: "upgrades", mode } : { view: "runs", mode })) +
+    esc(to(view === "upgrades" ? { view: "upgrades", mode }
+      : { view: "runs", mode, source: state.source, menus: state.menus })) +
     '">' + esc(label) +
     (n === undefined ? "" : ' <span class="dim">' + n + '</span>') + '</a>';
   return '<p class="tabs">' +
@@ -1413,15 +1503,54 @@ function modeTabs(modes, view) {
 // would toggle between two identical lists.
 function emptyChips(t) {
   if (!t || !t.empty) return "";
+  // A filter on the tab somebody is on, so it keeps that tab.
   const chip = (label, on, menus) =>
     '<a class="btn mode' + (on ? " on" : "") + '" href="' +
-    esc(to({ view: "runs", menus })) + '">' + esc(label) + '</a>';
+    esc(to({ view: "runs", menus, mode: state.mode, source: state.source })) + '">' +
+    esc(label) + '</a>';
   return '<p class="dim">Sessions: ' +
     chip("got into a game", !state.menus, false) + " " +
     chip("all (" + t.empty + " menus only)", !!state.menus, true) + '</p>';
 }
 
+// How a session ended, in three states rather than two. A session that is still
+// checking in has not ended at all, and drawing it as "closed" or "crashed" is
+// the portal reporting an outcome that has not happened.
+function endedCell(s) {
+  return '<td>' + (s.live
+    ? '<span class="outcome-live">live</span>' +
+      '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
+    : s.ended_in_crash
+      ? '<span class="outcome-crashed">crashed</span>'
+      : '<span class="dim">closed</span>') + '</td>';
+}
+
+// A non-player source's row: its own columns, read off the report its run
+// ended on. A run that ended without one, closed or crashed before it could
+// say how it went, says so under its id, since every column beside it is then
+// read off whatever it last managed to send.
+function sourceRows(sessions, spec) {
+  return sessions.map((s) => {
+    const sr = s.source_report;
+    const ctx = sr && sr.context;
+    return '<tr data-href="' + esc(to({ view: "runs", session: s.session })) + '">' +
+      '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
+      '<td><a href="' + esc(to({ view: "runs", session: s.session })) + '">' + esc(s.session) + '</a>' +
+        (sr && !sr.verdict && !s.live ? '<br><span class="kind-error">no verdict</span>' : '') + '</td>' +
+      spec.columns.map((c) => {
+        const v = sourceCell(ctx, c);
+        return '<td' + (v === "-" ? ' class="dim"' : '') + '>' + esc(v) + '</td>';
+      }).join("") +
+      '<td class="num' + (s.seconds ? '' : ' dim') + '">' + esc(s.seconds ? dur(s.seconds) : "-") + '</td>' +
+      '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
+      endedCell(s) +
+      '</tr>';
+  }).join("");
+}
+
 function sessionRows(sessions) {
+  const spec = listSpec();
+  if (spec) return sourceRows(sessions, spec);
   return sessions.map((s) =>
     '<tr data-href="' + esc(to({ view: "runs", session: s.session })) + '">' +
     '<td class="dim" title="' + esc(when(s.last_seen)) + '">' + esc(ago(s.last_seen)) + '</td>' +
@@ -1435,15 +1564,7 @@ function sessionRows(sessions) {
     '<td class="dim">' + esc(s.modes || "-") + '</td>' +
     '<td>' + tally(s) + '</td>' +
     '<td class="num ' + (s.faults ? "kind-error" : "dim") + '">' + (s.faults || "-") + '</td>' +
-    // Three states, not two. A session that is still checking in has not
-    // ended at all, and drawing it as "closed" or "crashed" is the portal
-    // reporting an outcome that has not happened.
-    '<td>' + (s.live
-      ? '<span class="outcome-live">live</span>' +
-        '<br><span class="dim">' + esc(ago(s.last_seen)) + '</span>'
-      : s.ended_in_crash
-        ? '<span class="outcome-crashed">crashed</span>'
-        : '<span class="dim">closed</span>') + '</td>' +
+    endedCell(s) +
     '</tr>').join("");
 }
 
@@ -1460,7 +1581,9 @@ const FAULTS = ["crash", "error", "warning"];
 // page itself, and a session that cannot be found in the list is still a
 // session somebody can read the reports of.
 async function sessionRow(session) {
-  const q = new URLSearchParams({ limit: "500", menus: "1" });
+  // Every source: a drill-down shows one session, whoever played it, and the
+  // list's default of people only would lose every bot session here.
+  const q = new URLSearchParams({ limit: "500", menus: "1", source: "all" });
   if (state.game) q.set("game", state.game);
   try {
     const { sessions } = await api("/v1/sessions?" + q.toString());
@@ -1502,6 +1625,22 @@ function sessionAbout(row, runs, faults) {
       : row.entered ? '' : '<dt>got into a game</dt><dd class="dim">no, menus only</dd>') +
     (runs.length ? '<dt>outcomes</dt><dd>' + tally(row) + '</dd>' : '') +
     '</dl></div>');
+
+  // NOBODY AT THE CONTROLS. A bot's session says what it was told to play and
+  // how it went, in the columns its game's entry names, and links the report
+  // that verdict came from, which is the whole of it.
+  if (row.source && row.source !== PLAYER_SOURCE) {
+    const spec = sourceSpec(row.game, row.source);
+    const sr = row.source_report;
+    const pairs = spec && sr ? spec.columns.flatMap((c) => rowPairs(sr.context, c)) : [];
+    blocks.push('<div class="block"><h4>' + esc(sourceLabel(row.source)) + '</h4><dl class="kv">' +
+      pairs.map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + esc(String(p[1])) + '</dd>').join("") +
+      (sr
+        ? '<dt>' + (sr.verdict ? 'verdict' : 'last word') + '</dt><dd><a href="' +
+          esc(to({ report: sr.id })) + '">' + (sr.verdict ? 'the report' : 'no verdict sent') + '</a></dd>'
+        : '') +
+      '</dl></div>');
+  }
 
   blocks.push('<div class="block"><h4>Machine</h4><dl class="kv">' +
     '<dt>platform</dt><dd>' + esc(row.platform || "-") + '</dd>' +
@@ -1553,7 +1692,11 @@ async function viewOneSession() {
   ]);
   const faults = reports.filter((r) => FAULTS.includes(r.kind));
 
-  const crumb = '<p class="crumb"><a class="btn" href="' + esc(to({ view: "runs" })) + '">All sessions</a>' +
+  // Back to the tab this session is listed under, which for a bot's session is
+  // not the default one.
+  const backTo = row && row.source && row.source !== PLAYER_SOURCE ? row.source : "";
+  const crumb = '<p class="crumb"><a class="btn" href="' + esc(to({ view: "runs", source: backTo })) + '">' +
+    (backTo ? 'All ' + esc(sourceLabel(backTo).toLowerCase()) + ' sessions' : 'All sessions') + '</a>' +
     '<span class="dim">session ' + esc(state.session) + '</span>' +
     (state.mode
       ? '<span class="dim">/</span><a class="btn" href="' +
@@ -1749,6 +1892,15 @@ function rowPairs(c, row) {
     const [label, path, format] = row;
     const v = reach(c, path);
     if (v === undefined || v === null || v === "") return [];
+    // A list is its entries, comma separated, and an empty one is nothing:
+    // the clutches broken on a level that had none to break is not a row.
+    if (Array.isArray(v)) return v.length ? [[label, v.join(", ")]] : [];
+    // A count out of a whole, "9 / 10". The whole is optional, because a run
+    // that never learned how many there were still knows how many it did.
+    if (format && typeof format === "object" && format.of) {
+      const of = reach(c, format.of);
+      return [[label, of === undefined || of === null || of === "" ? v : v + " / " + of]];
+    }
     if (format === "mmss") return [[label, mmss(v)]];
     if (typeof format === "string" && format.includes("/")) {
       const [yes, no] = format.split("/");

@@ -134,3 +134,21 @@ test("a fresh directory still gets the whole schema in one go", () => {
   }
   store.close();
 });
+
+test("an older database gains the session index, so a session is a lookup", () => {
+  const dir = tempDir();
+  makeOldDatabase(dir);
+
+  const store = openDatabase(dir);
+  const indexes = store.db.prepare("PRAGMA index_list(reports)").all().map((i) => i.name);
+  assert.ok(indexes.includes("reports_session"), "the index is created on boot, in place");
+  // And the lookup of the report each bot run ended on actually uses it,
+  // rather than walking the table once per page.
+  const plan = store.db.prepare(`
+    EXPLAIN QUERY PLAN SELECT id FROM reports WHERE session IN (SELECT value FROM json_each(?))
+  `).all('["session-old"]').map((r) => r.detail).join(" | ");
+  assert.match(plan, /reports_session/, plan);
+  assert.equal(store.verdicts({ sessions: ["session-old"], path: "anything" }).get("session-old").id, "old-1",
+    "and an old row with no verdict is still the last word its session sent");
+  store.close();
+});

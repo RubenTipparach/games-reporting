@@ -3,12 +3,12 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
-import { openDatabase, PAGE, pageLimit } from "./db.js";
+import { openDatabase, PAGE, pageLimit, PLAYER_SOURCE } from "./db.js";
 import { RateLimiter } from "./ratelimit.js";
 import { signatureOf, titleOf } from "./signature.js";
 import { loadSalt, pseudonym } from "./identity.js";
 import { adminPage } from "./admin.js";
-import { GAMES, isGameId, upgradePathFor, picksPathFor } from "./games.js";
+import { GAMES, isGameId, upgradePathFor, picksPathFor, sourceSpec, sourcePaths } from "./games.js";
 
 const store = openDatabase(config.dataDir);
 const idSalt = loadSalt(config.dataDir);
@@ -320,6 +320,70 @@ function loadIcons() {
 
 const ICONS = loadIcons();
 
+// WHO A LIST IS ABOUT, off a query string. People unless the caller says
+// otherwise: the session list and the upgrade tally are a playtest's numbers,
+// and a bot that played forty seeds overnight is forty sessions nobody played,
+// forty sets of outcomes and, if one of its builds crashes, a crash rate that
+// describes the bot. "all" is both, for a caller that really wants them mixed.
+function sourceParam(q) {
+  const asked = (q.get("source") || "").trim();
+  if (asked === "all") return undefined;
+  return asked || PLAYER_SOURCE;
+}
+
+// Only the paths a source's columns read, out of the report a run of it ended
+// on, nested again so the page reads them with the same dotted paths it reads
+// any other context with. That report is kilobytes; the columns are a few
+// dozen bytes of it.
+function project(text, paths) {
+  let ctx;
+  try {
+    ctx = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  const out = {};
+  for (const path of paths) {
+    const keys = path.split(".");
+    const value = keys.reduce((v, k) => (v == null ? v : v[k]), ctx);
+    if (value === undefined) continue;
+    let at = out;
+    for (const k of keys.slice(0, -1)) {
+      if (!at[k] || typeof at[k] !== "object") at[k] = {};
+      at = at[k];
+    }
+    at[keys[keys.length - 1]] = value;
+  }
+  return out;
+}
+
+// Each non-player row's own columns, for a source its game's entry describes.
+// Looked up by the row's OWN game rather than the one asked about, so the list
+// across every game gets them too. One query per game and source on the page,
+// never one per row.
+function withSourceReports(sessions) {
+  const wanted = new Map();
+  for (const s of sessions) {
+    if (s.source === PLAYER_SOURCE) continue;
+    const spec = sourceSpec(s.game, s.source);
+    if (!spec) continue;
+    const key = JSON.stringify([s.game, s.source]);
+    if (!wanted.has(key)) wanted.set(key, { game: s.game, spec, rows: [] });
+    wanted.get(key).rows.push(s);
+  }
+  for (const { game, spec, rows } of wanted.values()) {
+    const found = store.verdicts({ game, sessions: rows.map((r) => r.session), path: spec.verdict });
+    const paths = sourcePaths(spec);
+    for (const r of rows) {
+      const hit = found.get(r.session);
+      // `verdict` says whether this is the report the run ENDED on, or only the
+      // last thing a run that never got that far managed to send.
+      if (hit) r.source_report = { id: hit.id, verdict: hit.final, context: project(hit.context, paths) };
+    }
+  }
+  return sessions;
+}
+
 function handleRequest(req, res, url) {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -435,21 +499,26 @@ function handleRequest(req, res, url) {
     if (!upgradePath) {
       return send(res, 200, { game, upgrades: null, runs: 0, taken: [], never: [], sectors: [] });
     }
+    // People's builds unless asked otherwise, and the chips and tabs above the
+    // tally with them: a sector only a bot has played is not a place players
+    // went.
+    const source = sourceParam(q);
     const tally = store.upgradeTally({
       game,
       path: upgradePath,
       sector: q.get("sector") || undefined,
       depth: q.get("depth") || undefined,
       mode: q.get("mode") || undefined,
+      source,
     });
     const entry = GAMES.find((g) => g.id === game);
     return send(res, 200, {
       game,
       upgrades: entry.upgrades,
-      sectors: store.runPlaces({ game }),
+      sectors: store.runPlaces({ game, source }),
       // The modes this game reports, so the tally can be split by them without
       // the portal holding a list of any game's words.
-      modes: store.sessionTotals({ game }).modes,
+      modes: store.sessionTotals({ game, source }).modes,
       ...tally,
     });
   }
@@ -501,17 +570,21 @@ function handleRequest(req, res, url) {
       // the service and draw twelve, and the cursor would be paging the wrong
       // list.
       withEmpty: q.get("menus") === "1",
+      // People, unless the caller names a source or asks for "all". Held back
+      // here, on the service, for the same reason the menus are: a page of
+      // fifty players is fifty players, and the totals above it are theirs.
+      source: sourceParam(q),
       // The window a session has to check in inside to still count as
       // running. Both halves come from config so they can be moved with the
       // game's own heartbeat rather than by editing a query.
       staleAfter: config.heartbeatSeconds * config.heartbeatStaleFactor * 1000,
     };
-    const sessions = store.sessions({
+    const sessions = withSourceReports(store.sessions({
       ...shared,
       limit,
       before,
       beforeId: q.get("before_id") || undefined,
-    });
+    }));
     const next = nextCursor(sessions, limit, "last_seen", "session");
     return send(res, 200, {
       sessions,

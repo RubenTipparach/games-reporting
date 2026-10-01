@@ -34,6 +34,7 @@ for every game and the registry says nothing about them:
 | Sessions | the five minute check-in, live vs ended, ended in a crash |
 | Getting in | whether a session ever ENTERED a game, which is not whether it finished a run |
 | Run outcomes | succeeded, failed, quit |
+| Who played | `source`: absent or `player` is a person, anything else is not |
 
 ### What is game-specific, and therefore IS the registry
 
@@ -50,6 +51,7 @@ for every game and the registry says nothing about them:
 | `upgrades.icons` | where that game's art lives, one `<key>.png` per upgrade |
 | `upgrades.picks` | where a run keeps the ORDER they were taken in, and what its entries call their fields |
 | `stats` | where a run keeps the mech at BOTH ends of it, and which of those figures share a unit |
+| `sources` | what each of the game's non-player sources says about itself: the key its verdict is under, and its tab's columns |
 
 ## Adding a game
 
@@ -206,6 +208,43 @@ exact. It is worth having on its own - a survival build and a campaign build
 are taken against different lengths and different failure conditions, and
 tallying them together produces a ranking that describes neither.
 
+## A bot is not a playtest
+
+Mining Mike's autopilot plays a level from landing to extraction with nobody
+at the controls, and it reports exactly like a player does: check-ins, a run
+summary, the lot. Every report it sends carries `source: "autopilot"`; a
+person's carries `source: "player"`, and builds from before the field carry
+nothing.
+
+So **who was at the controls is generic**, and so is the rule: absent or
+`player` is a person, anything else is not. A session is a bot's if ANY of its
+reports says so. Nothing is stored for it: the rollup reads `source` out of
+the context in place, which is also why there was no backfill to run. An old
+row says nothing, and nothing is a person.
+
+- **Every playtest number is people unless asked otherwise.** `/v1/sessions`
+  (the rows, the totals, the crash rate, the mode tabs) and `/v1/upgrades`
+  default to `source=player`; `source=<name>` is one source and `source=all`
+  is both. Held back on the service, like the menus, so a page and its header
+  describe the same list. In the latest 200 reports on the live service when
+  this was built, 28 sessions were the bot's against 13 people's, and 20 of
+  the 31 runs in the upgrade tally were its.
+- **The store's default is everything.** The same split as `withEmpty`: the
+  store hands back what is in the table, and that a playtest is about people
+  is the route's call.
+- **The tabs come from the data.** The session list draws Players and one tab
+  per other source the reports carry, so a game with only people draws none.
+  Unlike the modes, sources DO partition the sessions, so those tabs add up.
+- **What a bot says about itself is the registry's.** `sources.<name>.verdict`
+  is the context key on the one report its run ends on, and `columns` are
+  block grammar rows read off that report. The route projects just those
+  paths out of it, so a row carries a few dozen bytes and not the report's
+  kilobytes. A run that never sent a verdict is read off the last thing it
+  did send, and its row says "no verdict", because that is a hung or crashed
+  run and its seed is what replays it.
+- **The issue list and the report lists are NOT filtered.** A crash the bot
+  finds is a crash in the game, and the whole point of a bot is finding them.
+
 ## A page with no runs still has to say something
 
 A session that finished nothing still has a machine, a build, two clocks and
@@ -241,6 +280,7 @@ somebody does with this service is paste a link at somebody else:
 /mining-mike/issues            /mining-mike/issues/<signature>
 /mining-mike/reports           /mining-mike/reports/<id>
 /mining-mike/sessions          ?mode=survival narrows it, ?menus=1 widens it
+                               ?source=autopilot is the bot's tab
 /mining-mike/sessions/<session>/<mode>
 /mining-mike/upgrades          ?sector=<name> and ?mode=<name> narrow it
 /issues                        the same pages across every game

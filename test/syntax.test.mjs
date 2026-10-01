@@ -15,8 +15,11 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const SRC = new URL("../src/", import.meta.url).pathname;
+// fileURLToPath and not `.pathname`, which on Windows is "/C:/..." and names
+// no directory at all, so the check failed to start rather than failing a file.
+const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
 for (const file of readdirSync(SRC).filter((f) => f.endsWith(".js"))) {
   test(`src/${file} parses`, () => {
