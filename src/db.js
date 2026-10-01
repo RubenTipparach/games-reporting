@@ -74,6 +74,47 @@ function sessionMode(mode, args) {
   return "json_extract(context, '$.mode') = @mode";
 }
 
+// WHO WAS AT THE CONTROLS.
+//
+// Every report says so in `source`, and the rule is generic: absent or this
+// word is a person, anything else is not. Absent counts as a person because it
+// is what every build sent before the field existed, and every one of those
+// was a person: the field arrived with the first thing that was not.
+export const PLAYER_SOURCE = "player";
+
+// One session's source, as an aggregate. A session is a bot's if ANY of its
+// reports says so, rather than its last one, because a bot run that crashed
+// may have said it only once.
+//
+// Read out of the context in place, like every other field here, so there is
+// no column to add and no backfill to run: an old row says nothing, and
+// nothing is a person.
+const SESSION_SOURCE = `
+  COALESCE(MAX(CASE WHEN COALESCE(json_extract(context, '$.source'), '') NOT IN ('', '${PLAYER_SOURCE}')
+                    THEN json_extract(context, '$.source') END), '${PLAYER_SOURCE}')`;
+
+// The HAVING test for one source, or nothing at all. The store's default is
+// nothing, like `withEmpty`: it hands back what is in the table, and that a
+// playtest's numbers are about people is the route's decision.
+function sessionSource(source, args) {
+  if (!source) return null;
+  args.source = source;
+  return "source = @source";
+}
+
+// The same question about ONE report, for the counts that are made over
+// reports rather than over sessions (the upgrade tally). Every report a bot
+// sends carries the field, its run summaries included, so a run is told
+// apart by its own row.
+function reportSource(source, args, col = "context") {
+  if (!source) return "";
+  if (source === PLAYER_SOURCE) {
+    return ` AND COALESCE(json_extract(${col}, '$.source'), '') IN ('', '${PLAYER_SOURCE}')`;
+  }
+  args.source = source;
+  return ` AND json_extract(${col}, '$.source') = @source`;
+}
+
 function sessionFilter(game, args) {
   let filter = "WHERE session <> ''";
   if (game) {
@@ -127,6 +168,10 @@ function sessionRollup(filter, having, inMode = "1") {
                  -- What they played. A session can hold both, so this is the
                  -- set rather than a single value.
                  GROUP_CONCAT(DISTINCT json_extract(context, '$.mode')) AS modes,
+                 -- A person, or something else at the controls. A bot's runs
+                 -- are not a playtest, and counted in with one they move the
+                 -- crash rate and the outcomes by however many of them ran.
+                 ${SESSION_SOURCE} AS source,
                  -- Counted for the MODE being asked about, when one is. A tab
                  -- labelled survival showing a session's campaign runs beside
                  -- its survival ones is a tab that means nothing.
@@ -234,6 +279,11 @@ export function openDatabase(dataDir) {
     CREATE INDEX IF NOT EXISTS reports_received ON reports (received_at DESC);
     CREATE INDEX IF NOT EXISTS reports_signature ON reports (signature, received_at DESC);
     CREATE INDEX IF NOT EXISTS reports_game ON reports (game, received_at DESC);
+    -- One session's reports. The drill-down asks for them by session, and so
+    -- does the lookup of the report each bot run ended on, once per page of
+    -- the list; without this both are a walk of the whole table. Created on
+    -- boot like the others, so an existing volume gains it in place.
+    CREATE INDEX IF NOT EXISTS reports_session ON reports (session, received_at);
   `);
 
   const stmts = {
@@ -461,7 +511,7 @@ export function openDatabase(dataDir) {
     // here, so the same rows can be asked about at a chosen instant - which is
     // what makes liveness testable without waiting five minutes for it.
     sessions({
-      game, mode, limit = 100, now = Date.now(), staleAfter = 600_000,
+      game, mode, source, limit = 100, now = Date.now(), staleAfter = 600_000,
       withEmpty = true, before, beforeId,
     } = {}) {
       const args = {
@@ -490,6 +540,9 @@ export function openDatabase(dataDir) {
       if (!withEmpty) tests.push("(runs > 0 OR entered = 1)");
       // A mode tab lists the sessions that PLAYED that mode.
       if (mode) tests.push("in_mode = 1");
+      // And a source tab the sessions somebody, or something, played.
+      const bySource = sessionSource(source, args);
+      if (bySource) tests.push(bySource);
       if (before) {
         // `session` is the GROUP BY key and so is unique per row, which makes
         // (last_seen, session) a total order the same way (received_at, id) is
@@ -517,13 +570,18 @@ export function openDatabase(dataDir) {
     // out from the rows on screen was fine while one screenful was all there
     // was; with a cursor under the list it would mean a crash rate that moved
     // every time somebody pressed Load more.
-    sessionTotals({ game, mode, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
+    sessionTotals({ game, mode, source, now = Date.now(), staleAfter = 600_000, withEmpty = true } = {}) {
       const args = { now, staleAfter };
       const filter = sessionFilter(game, args);
       const inMode = sessionMode(mode, args);
       const tests = [];
       if (!withEmpty) tests.push("(runs > 0 OR entered = 1)");
       if (mode) tests.push("in_mode = 1");
+      // The totals are the header OF the list, so they follow its source the
+      // way they follow its mode: a crash rate over people and bots together
+      // describes neither.
+      const bySource = sessionSource(source, args);
+      if (bySource) tests.push(bySource);
       const shown = sessionRollup(
         filter, tests.length ? "HAVING " + tests.join(" AND ") : "", inMode);
       const totals = db.prepare(`
@@ -547,7 +605,8 @@ export function openDatabase(dataDir) {
       const empty = db.prepare(`
         SELECT COUNT(*) AS n FROM (${sessionRollup(
           filter,
-          "HAVING runs = 0 AND entered = 0" + (mode ? " AND in_mode = 1" : ""),
+          "HAVING runs = 0 AND entered = 0" + (mode ? " AND in_mode = 1" : "") +
+            (bySource ? " AND " + bySource : ""),
           inMode,
         )})
       `).get(args).n;
@@ -569,18 +628,78 @@ export function openDatabase(dataDir) {
       // Deliberately NOT narrowed by the mode being shown: tabs that disappear
       // when you click them are not tabs. Its own args, because it reads none
       // of the clocks the rollup binds.
+      //
+      // It IS narrowed by the source, because the mode tabs sit under the
+      // source tab: "survival 562" on the players' tab has to be people.
       const modeArgs = {};
+      const modeFilter = sessionFilter(game, modeArgs);
+      const modeSource = source
+        ? ` AND session IN (SELECT session FROM reports ${modeFilter}
+                            GROUP BY session HAVING ${SESSION_SOURCE} = @source)`
+        : "";
+      if (source) modeArgs.source = source;
       const modes = db.prepare(`
         SELECT mode, COUNT(*) AS sessions FROM (
           SELECT DISTINCT session, json_extract(context, '$.mode') AS mode
           FROM reports
-          ${sessionFilter(game, modeArgs)}
+          ${modeFilter}${modeSource}
         )
         WHERE mode IS NOT NULL AND mode <> ''
         GROUP BY mode
         ORDER BY sessions DESC, mode
       `).all(modeArgs);
-      return { ...totals, empty, median: Math.round(median), modes };
+      // WHO PLAYED, as tabs, for the same reason the modes are: built from the
+      // sources the reports carry, so a game with only people gets no tab row,
+      // and a game whose bot calls itself something else gets that word.
+      //
+      // People first, then the rest by size. Narrowed by the menus filter and
+      // nothing else, so the number on a tab is the number of rows it lists
+      // and does not move when it, or a mode, is clicked.
+      const sourceArgs = { now, staleAfter };
+      const sources = db.prepare(`
+        SELECT source, COUNT(*) AS sessions FROM (${sessionRollup(
+          sessionFilter(game, sourceArgs),
+          withEmpty ? "" : "HAVING (runs > 0 OR entered = 1)",
+        )})
+        GROUP BY source
+        ORDER BY source = '${PLAYER_SOURCE}' DESC, sessions DESC, source
+      `).all(sourceArgs);
+      return { ...totals, empty, median: Math.round(median), modes, sources };
+    },
+
+    // The report each of these sessions ended on, for a source that ends its
+    // runs on one: the latest report carrying `path`, or, for a session that
+    // never sent one, the latest report it did send. That second half is the
+    // run that hung or crashed before it could say how it went, and its seed
+    // is the thing anybody needs to play it again.
+    //
+    // One query for a page of sessions rather than one per row, and one row
+    // per session out of it: the choosing is done here, so the kilobytes of
+    // context on every other report never leave SQLite.
+    verdicts({ game, sessions, path }) {
+      const out = new Map();
+      if (!path || !sessions || !sessions.length) return out;
+      const args = { ids: JSON.stringify(sessions), json: "$." + path };
+      let gameTest = "";
+      if (game) {
+        gameTest = " AND game = @game";
+        args.game = game;
+      }
+      const rows = db.prepare(`
+        SELECT id, session, context, final FROM (
+          SELECT id, session, context,
+                 json_type(context, @json) IS NOT NULL AS final,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session
+                   ORDER BY json_type(context, @json) IS NOT NULL DESC, received_at DESC, id DESC
+                 ) AS n
+          FROM reports
+          WHERE session IN (SELECT value FROM json_each(@ids))${gameTest}
+        )
+        WHERE n = 1
+      `).all(args);
+      for (const r of rows) out.set(r.session, { id: r.id, final: !!r.final, context: r.context });
+      return out;
     },
 
     // WHAT PLAYERS BUILT, tallied across runs.
@@ -595,11 +714,13 @@ export function openDatabase(dataDir) {
     // it was taken at. Levels come back as a list rather than an average
     // because the median is the honest middle of a handful of runs and SQLite
     // has no median function; the caller takes it.
-    upgradeTally({ game, path, sector, depth, mode }) {
+    upgradeTally({ game, path, sector, depth, mode, source }) {
       if (!game || !path) return { runs: 0, taken: [], never: [] };
       const json = "$." + path;
       const args = { game, json };
-      let filter = "WHERE r.kind = 'run' AND r.game = @game";
+      // A bot's build is a brain's choice, not a player's, and ranking the two
+      // together says which one ran more often.
+      let filter = "WHERE r.kind = 'run' AND r.game = @game" + reportSource(source, args, "r.context");
       // A survival build and a campaign build are different builds, taken
       // against different lengths and different failure conditions. Tallying
       // them together produces a ranking that describes neither.
@@ -664,15 +785,16 @@ export function openDatabase(dataDir) {
     },
 
     // The places runs happened, for the filter chips above the tally.
-    runPlaces({ game }) {
+    runPlaces({ game, source }) {
       if (!game) return [];
+      const args = { game };
       return db.prepare(`
         SELECT DISTINCT json_extract(context, '$.sector_title') AS sector
         FROM reports
-        WHERE kind = 'run' AND game = @game
+        WHERE kind = 'run' AND game = @game${reportSource(source, args)}
           AND json_extract(context, '$.sector_title') IS NOT NULL
         ORDER BY sector
-      `).all({ game }).map((r) => r.sector);
+      `).all(args).map((r) => r.sector);
     },
 
     // Which games have actually posted, and how much. The registry says what

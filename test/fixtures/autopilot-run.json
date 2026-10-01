@@ -1,0 +1,530 @@
+{
+  "//": "Copied off games-reporting.fly.dev on 2026-10-01: one autopilot run of Mining Mike (session 7753b0da4476), as it was sent. A heartbeat, the run summary, and the session report carrying the bot verdict.",
+  "heartbeat": {
+    "id": "0aa56277-e6be-41f9-a42f-186840bec472",
+    "kind": "session",
+    "title": "open 8m 59s, 8m 23s in game",
+    "message": "open 8m 59s, 8m 23s in game",
+    "version": "dev",
+    "platform": "Windows",
+    "engine": "4.7.1",
+    "context": {
+      "aliens_alive": 6,
+      "autopilot": {
+        "brain": "egg_multibarrel",
+        "depth": 2,
+        "load": "dust-hive_d2_egg-chambers_2026-10-01_1217.dat",
+        "revision": "342ffbf4+dirty",
+        "role": "NONE",
+        "sector": 0,
+        "seed": 2
+      },
+      "branch": "",
+      "built_at": "",
+      "channel": "full",
+      "ci_build": false,
+      "commit": "",
+      "coop": false,
+      "cores": 16,
+      "cpu": "11th Gen Intel(R) Core(TM) i9-11900H @ 2.50GHz",
+      "credits": 51,
+      "depth": 2,
+      "depth_times": {},
+      "difficulty_wave": 18,
+      "errors": {},
+      "errors_suppressed": 0,
+      "fps": 32,
+      "heartbeat": true,
+      "kills": 403,
+      "mech": {
+        "hp": "150/150",
+        "level": 10,
+        "role": "Generalist",
+        "upgrades": {
+          "acid_lobber": 0,
+          "armor": 0,
+          "attack_speed": 1,
+          "burning": 2,
+          "chain_lightning": 2,
+          "crit_chance": 1,
+          "crusader_ball_damage": 0,
+          "crusader_balls": 0,
+          "crusader_spin": 0,
+          "damage_aura": 2,
+          "dodge": 0,
+          "health_regen": 1,
+          "ice": 0,
+          "max_health": 2,
+          "mining_heads": 0,
+          "mining_range": 0,
+          "mining_speed": 0,
+          "missiles": 0,
+          "move_speed": 0,
+          "orbital_lasers": 1,
+          "pickup_range": 0,
+          "power_output": 0,
+          "refinery_speed": 0,
+          "rock_regen": 0,
+          "shoot_range": 2,
+          "shotgun": 3,
+          "turret_damage": 1,
+          "turret_fire_rate": 0
+        },
+        "weapons": {
+          "burning": 1,
+          "chain_lightning": 3,
+          "damage_aura": 3,
+          "orbital_lasers": 1,
+          "shotgun": 3
+        },
+        "xp": 93,
+        "xp_to_next": 135
+      },
+      "mode": "campaign",
+      "peers": 1,
+      "played_sec": 503,
+      "prestige": 1,
+      "renderer": "forward_plus",
+      "run": "7753b0da4476-r1",
+      "run_sec": 503,
+      "runs": {
+        "failed": 0,
+        "quit": 0,
+        "succeeded": 0
+      },
+      "screen": "in_run",
+      "sector": 0,
+      "sector_title": "Dust Hive",
+      "session_sec": 539,
+      "source": "autopilot",
+      "wave_number": 8,
+      "window": "0x0"
+    }
+  },
+  "run": {
+    "id": "69ceba0e-7b24-49b4-98d6-595f2f976f05",
+    "kind": "run",
+    "title": "failed at depth 2 after 10m 55s",
+    "message": "failed at depth 2 after 10m 55s",
+    "version": "dev",
+    "platform": "Windows",
+    "engine": "4.7.1",
+    "context": {
+      "aliens_alive": 24,
+      "autopilot": {
+        "brain": "egg_multibarrel",
+        "depth": 2,
+        "load": "dust-hive_d2_egg-chambers_2026-10-01_1217.dat",
+        "revision": "342ffbf4+dirty",
+        "role": "NONE",
+        "sector": 0,
+        "seed": 2
+      },
+      "branch": "",
+      "built_at": "",
+      "channel": "full",
+      "ci_build": false,
+      "commit": "",
+      "coop": false,
+      "cores": 16,
+      "cpu": "11th Gen Intel(R) Core(TM) i9-11900H @ 2.50GHz",
+      "credits": 73,
+      "depth": 2,
+      "depth_times": {
+        "2": 655
+      },
+      "difficulty_wave": 20,
+      "fps": 25,
+      "kills": 568,
+      "mech": {
+        "hp": "0/150",
+        "level": 11,
+        "role": "Generalist",
+        "stats": {
+          "end": {
+            "burn_dps": 8,
+            "chain": 4,
+            "chassis": "Generalist",
+            "crit_chance": 0.1,
+            "damage": 10,
+            "dps": 430.4,
+            "dps_air": 0,
+            "dps_around": 981.6,
+            "hull": 150,
+            "interval": 0.21,
+            "level": 11,
+            "pierce": 0,
+            "reach": 480,
+            "shots": 8,
+            "slow": 0,
+            "speed": 125,
+            "weapon": "Blaster"
+          },
+          "start": {
+            "burn_dps": 4,
+            "chain": 4,
+            "chassis": "Generalist",
+            "crit_chance": 0,
+            "damage": 10,
+            "dps": 292,
+            "dps_air": 0,
+            "dps_around": 721.2,
+            "hull": 150,
+            "interval": 0.21,
+            "level": 6,
+            "pierce": 0,
+            "reach": 440,
+            "shots": 6,
+            "slow": 0,
+            "speed": 125,
+            "weapon": "Blaster"
+          }
+        },
+        "upgrades": {
+          "acid_lobber": 0,
+          "armor": 0,
+          "attack_speed": 1,
+          "burning": 2,
+          "chain_lightning": 2,
+          "crit_chance": 1,
+          "crusader_ball_damage": 0,
+          "crusader_balls": 0,
+          "crusader_spin": 0,
+          "damage_aura": 2,
+          "dodge": 0,
+          "health_regen": 1,
+          "ice": 0,
+          "max_health": 2,
+          "mining_heads": 0,
+          "mining_range": 0,
+          "mining_speed": 0,
+          "missiles": 0,
+          "move_speed": 0,
+          "orbital_lasers": 1,
+          "pickup_range": 0,
+          "power_output": 0,
+          "refinery_speed": 0,
+          "rock_regen": 0,
+          "shoot_range": 2,
+          "shotgun": 4,
+          "turret_damage": 1,
+          "turret_fire_rate": 0
+        },
+        "weapons": {
+          "burning": 1,
+          "chain_lightning": 3,
+          "damage_aura": 3,
+          "orbital_lasers": 1,
+          "shotgun": 3
+        },
+        "xp": 97,
+        "xp_to_next": 147
+      },
+      "mode": "campaign",
+      "outcome": "failed",
+      "peers": 1,
+      "played_sec": 1310,
+      "prestige": 1,
+      "renderer": "forward_plus",
+      "run": "7753b0da4476-r1",
+      "run_sec": 655,
+      "run_seconds": 655,
+      "screen": "in_run",
+      "sector": 0,
+      "sector_title": "Dust Hive",
+      "session_sec": 691,
+      "source": "autopilot",
+      "upgrade_picks": [
+        {
+          "at_sec": 80,
+          "key": "burning",
+          "wave": 2
+        },
+        {
+          "at_sec": 193,
+          "key": "shoot_range",
+          "wave": 4
+        },
+        {
+          "at_sec": 385,
+          "key": "crit_chance",
+          "wave": 7
+        },
+        {
+          "at_sec": 474,
+          "key": "shotgun",
+          "wave": 8
+        },
+        {
+          "at_sec": 513,
+          "key": "shotgun",
+          "wave": 8
+        }
+      ],
+      "wave_number": 10,
+      "window": "0x0"
+    }
+  },
+  "verdict": {
+    "id": "03e688c9-da82-42d1-82a9-1296babc8032",
+    "kind": "session",
+    "title": "autopilot lost: Egg Chambers, seed 2",
+    "message": "autopilot lost: Egg Chambers, seed 2",
+    "version": "dev",
+    "platform": "Windows",
+    "engine": "4.7.1",
+    "context": {
+      "aliens_alive": 25,
+      "autopilot": {
+        "brain": "egg_multibarrel",
+        "depth": 2,
+        "load": "dust-hive_d2_egg-chambers_2026-10-01_1217.dat",
+        "revision": "342ffbf4+dirty",
+        "role": "NONE",
+        "sector": 0,
+        "seed": 2
+      },
+      "autopilot_result": {
+        "bosses_killed": 3,
+        "brain": "res://resources/bot/egg_multibarrel.tres",
+        "buildings": {
+          "turret": 1,
+          "wall": 11
+        },
+        "cause": "HQ Destroyed",
+        "chained": 0,
+        "depth_cleared": false,
+        "end_screen": "DeathPanel",
+        "error_count": 0,
+        "frame_ms": {
+          "mean": 30.46,
+          "p95": 60.57
+        },
+        "game_seconds": 710,
+        "hq": {
+          "end": 0,
+          "min": 0
+        },
+        "kills": 564,
+        "level": {
+          "depth": 2,
+          "name": "Egg Chambers",
+          "sector": 0
+        },
+        "loaded_from": "dust-hive_d2_egg-chambers_2026-10-01_1217.dat",
+        "mech": {
+          "end": 0,
+          "level": 11,
+          "min": 0,
+          "upgrades": {
+            "acid_lobber": 0,
+            "armor": 0,
+            "attack_speed": 1,
+            "burning": 2,
+            "chain_lightning": 2,
+            "crit_chance": 1,
+            "crusader_ball_damage": 0,
+            "crusader_balls": 0,
+            "crusader_spin": 0,
+            "damage_aura": 2,
+            "dodge": 0,
+            "health_regen": 1,
+            "ice": 0,
+            "max_health": 2,
+            "mining_heads": 0,
+            "mining_range": 0,
+            "mining_speed": 0,
+            "missiles": 0,
+            "move_speed": 0,
+            "orbital_lasers": 1,
+            "pickup_range": 0,
+            "power_output": 0,
+            "refinery_speed": 0,
+            "rock_regen": 0,
+            "shoot_range": 2,
+            "shotgun": 4,
+            "turret_damage": 1,
+            "turret_fire_rate": 0
+          },
+          "weapons": {
+            "burning": 1,
+            "chain_lightning": 3,
+            "damage_aura": 3,
+            "orbital_lasers": 1,
+            "shotgun": 3
+          }
+        },
+        "mined": {
+          "crystal": 406,
+          "iron": 924
+        },
+        "objective": {
+          "fail": [],
+          "kind": "DESTROY",
+          "label": "DESTROY 22 EGG CLUTCHES",
+          "met": false,
+          "rows": [
+            "13/22 egg clutches broken"
+          ]
+        },
+        "playthrough": false,
+        "preset": "none",
+        "probe": false,
+        "role": "NONE",
+        "saves": [],
+        "seed": 2,
+        "source_revision": "342ffbf4+dirty",
+        "speed": 1.06,
+        "spent": {
+          "credits": [
+            885,
+            365
+          ],
+          "prestige": [
+            46,
+            1
+          ],
+          "rerolls": 0,
+          "research": [
+            "starting_iron",
+            "starting_crystal",
+            "turret_damage",
+            "turret_spread",
+            "unlock_repair",
+            "repair_rate",
+            "unlock_wall"
+          ],
+          "research_skipped": [
+            "wall_health"
+          ],
+          "sp": [
+            3,
+            3
+          ],
+          "store": [
+            "repair_drone"
+          ]
+        },
+        "stall": {
+          "seconds": 0.9,
+          "state": [
+            706,
+            10,
+            true,
+            20,
+            [
+              "13/22 egg clutches broken"
+            ],
+            "dodge",
+            0.79,
+            0.77,
+            "clutch at 1051 (240 hp)",
+            [
+              73.9,
+              -86.8
+            ],
+            [
+              70.2,
+              -105.5
+            ]
+          ]
+        },
+        "status": "lost",
+        "used": [
+          [
+            30.2,
+            "repair_drone",
+            [
+              60.2,
+              38.3
+            ]
+          ]
+        ],
+        "wall_seconds": 670.7,
+        "warning_count": 31,
+        "waves_cleared": 9,
+        "waves_total": 10,
+        "weapons_fitted": "",
+        "wrecks": {
+          "dug_out": 2,
+          "revealed": 4,
+          "salvaged": 1,
+          "sites": 7
+        }
+      },
+      "branch": "",
+      "built_at": "",
+      "channel": "full",
+      "ci_build": false,
+      "commit": "",
+      "coop": false,
+      "cores": 16,
+      "cpu": "11th Gen Intel(R) Core(TM) i9-11900H @ 2.50GHz",
+      "credits": 73,
+      "depth": 2,
+      "depth_times": {
+        "2": 655
+      },
+      "difficulty_wave": 20,
+      "fps": 56,
+      "kills": 568,
+      "mech": {
+        "hp": "0/150",
+        "level": 11,
+        "role": "Generalist",
+        "upgrades": {
+          "acid_lobber": 0,
+          "armor": 0,
+          "attack_speed": 1,
+          "burning": 2,
+          "chain_lightning": 2,
+          "crit_chance": 1,
+          "crusader_ball_damage": 0,
+          "crusader_balls": 0,
+          "crusader_spin": 0,
+          "damage_aura": 2,
+          "dodge": 0,
+          "health_regen": 1,
+          "ice": 0,
+          "max_health": 2,
+          "mining_heads": 0,
+          "mining_range": 0,
+          "mining_speed": 0,
+          "missiles": 0,
+          "move_speed": 0,
+          "orbital_lasers": 1,
+          "pickup_range": 0,
+          "power_output": 0,
+          "refinery_speed": 0,
+          "rock_regen": 0,
+          "shoot_range": 2,
+          "shotgun": 4,
+          "turret_damage": 1,
+          "turret_fire_rate": 0
+        },
+        "weapons": {
+          "burning": 1,
+          "chain_lightning": 3,
+          "damage_aura": 3,
+          "orbital_lasers": 1,
+          "shotgun": 3
+        },
+        "xp": 97,
+        "xp_to_next": 147
+      },
+      "mode": "campaign",
+      "peers": 1,
+      "played_sec": 655,
+      "prestige": 41,
+      "renderer": "forward_plus",
+      "run": "7753b0da4476-r1",
+      "screen": "in_run",
+      "sector": 0,
+      "sector_title": "Dust Hive",
+      "session_sec": 696,
+      "source": "autopilot",
+      "wave_number": 10,
+      "window": "0x0"
+    }
+  }
+}

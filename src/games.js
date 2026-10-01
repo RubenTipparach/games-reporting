@@ -39,6 +39,10 @@ export const RESERVED_IDS = new Set([
 //   {spread: "path"}               every key of an object, as its own row
 //   {spread: "path", omitZero}     ...skipping the ones sitting at zero
 //   {spread: "path", each: "tier"} ...with a word in front of each value
+//   ["label", "path", {of: "path"}] a count out of a whole, as "9 / 10"
+//
+// A value that is a list is its entries, comma separated, and an empty list is
+// no row at all.
 //
 // A grammar rather than a callback because this crosses into the browser as
 // JSON: the page is one file with no build step, and a registry that could
@@ -215,6 +219,41 @@ export const GAMES = [
       },
     },
 
+    // WHO ELSE PLAYS IT, besides people.
+    //
+    // Every report says who was at the controls in `source`, and that much is
+    // generic: absent or "player" is a person, anything else is not, and the
+    // service keeps everything that is not a person off the playtest numbers
+    // without being told. What is NOT generic is what one of those sources
+    // says about itself, so each one this game sends is described here, keyed
+    // by the value it sends.
+    //
+    //   verdict  the context key present on the one report a run of it ends
+    //            on, and on no other. The session list reads its columns off
+    //            that report.
+    //   columns  rows in the block grammar below, read off that report's
+    //            context, one column each on the source's own tab. A row can
+    //            also be ["label", "path", {of: "path"}], which reads "9 / 10".
+    //
+    // Mining Mike's autopilot (scripts/bot/ in godot-sandbox) plays a level
+    // with nobody at the controls and posts its verdict as a session report
+    // titled "autopilot won: Egg Chambers, seed 4".
+    sources: {
+      autopilot: {
+        verdict: "autopilot_result",
+        columns: [
+          ["level", "autopilot_result.level.name"],
+          ["seed", "autopilot.seed"],
+          ["brain", "autopilot.brain"],
+          ["result", "autopilot_result.status"],
+          ["waves", "autopilot_result.waves_cleared", { of: "autopilot_result.waves_total" }],
+          // What the level asked for, as the game counted it: the clutches
+          // broken on an egg level, nothing at all on a survive one.
+          ["objective", "autopilot_result.objective.rows"],
+        ],
+      },
+    },
+
     // Context blocks, drawn after the generic Session one and before the
     // generic Machine one. `when` is the test for drawing the block at all:
     // any one of these keys present is enough.
@@ -299,6 +338,7 @@ export function registryForPage() {
     blocks: g.blocks,
     upgrades: g.upgrades,
     stats: g.stats,
+    sources: g.sources,
   }));
 }
 
@@ -420,3 +460,58 @@ export function checkUpgrades(g) {
 }
 
 for (const g of GAMES) checkUpgrades(g);
+
+// ---------------------------------------------------------------------------
+// The sources other than people, checked at import like everything above and
+// for the same reason: each mistake here draws a tab that looks fine and reads
+// blanks.
+
+// What one of a game's non-player sources says about itself, or null. Null is
+// not a failure: a bot this game's entry does not describe still gets its own
+// tab and the generic columns, and nothing more, until somebody writes it in.
+export function sourceSpec(gameId, source) {
+  const g = gameById(gameId);
+  if (!g || !g.sources || !Object.prototype.hasOwnProperty.call(g.sources, source)) return null;
+  return g.sources[source];
+}
+
+// Every context path a source's columns read. The service hands the page those
+// and nothing else, because the report a bot run ends on is kilobytes of
+// context and a page of a hundred of them is most of a megabyte nobody draws.
+export function sourcePaths(spec) {
+  const paths = [];
+  for (const [, path, format] of spec.columns) {
+    paths.push(path);
+    if (format && typeof format === "object" && format.of) paths.push(format.of);
+  }
+  return paths;
+}
+
+export function checkSources(g) {
+  if (!g.sources) return;
+  for (const [name, s] of Object.entries(g.sources)) {
+    // The person is what every other view already describes, and the one
+    // source the service never holds off anything.
+    if (name === "player") throw new Error(`${g.id}: sources.player is the person, not a source to describe`);
+    if (!s || !s.verdict) throw new Error(`${g.id}: sources.${name} has no verdict key`);
+    // Bound into SQL as a JSON path, so it is held to a path's shape.
+    if (!PATH_SHAPE.test(s.verdict)) {
+      throw new Error(`${g.id}: sources.${name}.verdict ${s.verdict} is not a context path`);
+    }
+    if (!Array.isArray(s.columns) || !s.columns.length) {
+      throw new Error(`${g.id}: sources.${name} has no columns, so its tab has nothing of its own`);
+    }
+    for (const row of s.columns) {
+      const [label, path, format] = Array.isArray(row) ? row : [];
+      if (!label || typeof path !== "string" || !PATH_SHAPE.test(path)) {
+        throw new Error(`${g.id}: sources.${name} column ${JSON.stringify(row)} is not [label, path]`);
+      }
+      if (format && typeof format === "object" &&
+          (typeof format.of !== "string" || !PATH_SHAPE.test(format.of))) {
+        throw new Error(`${g.id}: sources.${name} column ${label} reads "of" a path that is not one`);
+      }
+    }
+  }
+}
+
+for (const g of GAMES) checkSources(g);

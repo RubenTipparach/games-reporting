@@ -82,6 +82,7 @@ opens on the thing you were looking at.
 | `/mining-mike/reports` | Every report, newest first, with **Load more** |
 | `/mining-mike/reports/<id>` | One report in full, with its stack, context and log |
 | `/mining-mike/sessions` | Every session, with playtime and which are still running |
+| `/mining-mike/sessions?source=autopilot` | The autopilot's runs: level, seed, brain, verdict, waves |
 | `/mining-mike/sessions/<session>` | One session: its runs and how far they got |
 | `/mining-mike/sessions/<session>/<mode>` | The same, narrowed to campaign or survival |
 | `/mining-mike/upgrades` | What players built, and how those runs ended |
@@ -114,7 +115,7 @@ around the key.
 | `GET /v1/reports` | admin | List, newest first; paged by cursor |
 | `GET /v1/reports/:id` | admin | One report, in full, with its log |
 | `GET /v1/signatures` | admin | One row per distinct crash, with counts; paged |
-| `GET /v1/sessions` | admin | One row per session, with playtime and outcome |
+| `GET /v1/sessions` | admin | One row per session, with playtime and outcome; people unless `source=` says otherwise |
 | `GET /v1/runs` | admin | Run summaries, filterable by session and mode |
 | `DELETE /v1/reports/:id` | admin | Drop one |
 
@@ -325,6 +326,29 @@ The filter is applied in SQL rather than on the page for the same reason: a
 page of fifty should be fifty rows somebody wants. Filtered after the fact it
 would be fifty rows taken off the service and however many of them happened to
 qualify, with the cursor paging a list nobody is looking at.
+
+### People and bots, on their own tabs
+
+```
+/mining-mike/sessions                     people
+/mining-mike/sessions?source=autopilot    the autopilot's runs
+/v1/sessions?game=mining-mike&source=all  both, for a caller that wants them mixed
+/v1/upgrades?game=mining-mike&source=autopilot   what the bot built
+```
+
+Every report says who was at the controls in `context.source`: absent or
+`player` is a person, anything else is not, and a session is a bot's if any of
+its reports says so. The session list, its totals and crash rate, its mode
+tabs and the upgrade tally are all **people by default**, so a night of bot
+runs does not land in a playtest's numbers. The issue list and the report
+lists are not filtered: a crash the bot finds is a crash in the game.
+
+The tabs come from the sources the reports carry. A bot's tab draws the
+columns its game's registry entry names under `sources`, read off the one
+report its run ended on (for Mining Mike's autopilot, the session report
+carrying `autopilot_result`). Each row carries those paths and nothing else as
+`source_report`, with `verdict: false` when the run never sent one and the
+columns are read off the last thing it did send.
 
 ### Campaign and survival, on their own tabs
 
